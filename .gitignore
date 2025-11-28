@@ -1,0 +1,21 @@
+# Build artifacts
+/target
+
+# Cargo lock is committed for binaries (reproducible builds)
+# Cargo.lock
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test artifacts
+*.profraw
+*.profdata
+
+# Release artifacts (built locally)
+*.tar.gz
+*.zip
