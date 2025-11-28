@@ -1,0 +1,78 @@
+# CI workflow for darwin-timeout.
+#
+# Fast feedback on every push/PR: lint first (fast fail), then test on both
+# macOS architectures in parallel. No universal binary build - that's only
+# needed for releases.
+
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+    tags-ignore:
+      - 'v*'
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Lint first - fast fail before expensive test matrix
+  lint:
+    name: Lint
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.90"
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  # Test on both macOS architectures after lint passes.
+  # Apple Silicon and Intel have subtle differences in process scheduling
+  # and signal delivery that we need to catch.
+  test:
+    name: Test (${{ matrix.arch }})
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: arm64
+          - os: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.90"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --release
+
+      - name: Verify binary
+        run: |
+          cargo build --release
+          ./target/release/timeout --version
+          ./target/release/timeout 0.1s sleep 60 || true

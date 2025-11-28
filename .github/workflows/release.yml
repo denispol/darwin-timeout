@@ -1,0 +1,126 @@
+# Release workflow for darwin-timeout.
+#
+# Triggered when a version tag (v*) is pushed. Runs tests, builds binaries
+# for all platforms, and creates a GitHub release.
+#
+# Produces:
+#   - timeout-<version>-macos-arm64.tar.gz      (Apple Silicon)
+#   - timeout-<version>-macos-x86_64.tar.gz     (Intel)
+#   - timeout-<version>-macos-universal.tar.gz  (Universal binary)
+#
+# Usage:
+#   git tag v1.0.0
+#   git push origin v1.0.0
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.90"
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Lint
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build for aarch64
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build for x86_64
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Create binaries
+        run: |
+          VERSION=${{ github.ref_name }}
+          mkdir -p dist
+          
+          # ARM64 (Apple Silicon)
+          cp target/aarch64-apple-darwin/release/timeout dist/timeout
+          strip dist/timeout
+          codesign -s - dist/timeout
+          tar -C dist -czvf dist/timeout-${VERSION}-macos-arm64.tar.gz timeout
+          rm dist/timeout
+          
+          # x86_64 (Intel)
+          cp target/x86_64-apple-darwin/release/timeout dist/timeout
+          strip dist/timeout
+          codesign -s - dist/timeout
+          tar -C dist -czvf dist/timeout-${VERSION}-macos-x86_64.tar.gz timeout
+          rm dist/timeout
+          
+          # Universal
+          lipo -create \
+            target/aarch64-apple-darwin/release/timeout \
+            target/x86_64-apple-darwin/release/timeout \
+            -output dist/timeout
+          strip dist/timeout
+          codesign -s - dist/timeout
+          tar -C dist -czvf dist/timeout-${VERSION}-macos-universal.tar.gz timeout
+          rm dist/timeout
+          
+          # Show results
+          ls -lh dist/
+
+      - name: Verify binaries
+        run: |
+          for f in dist/*.tar.gz; do
+            echo "=== $f ==="
+            tar -tzf "$f"
+            tar -xzf "$f" -C /tmp
+            file /tmp/timeout
+            /tmp/timeout --version
+            rm /tmp/timeout
+          done
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            ## Installation
+
+            Download the appropriate binary for your Mac:
+
+            | Platform | File |
+            |----------|------|
+            | Apple Silicon | `timeout-${{ github.ref_name }}-macos-arm64.tar.gz` |
+            | Intel | `timeout-${{ github.ref_name }}-macos-x86_64.tar.gz` |
+            | Universal | `timeout-${{ github.ref_name }}-macos-universal.tar.gz` |
+
+            ```bash
+            # Example: Install universal binary
+            tar -xzf timeout-${{ github.ref_name }}-macos-universal.tar.gz
+            sudo mv timeout /usr/local/bin/
+            ```
+
+            Verify with `timeout --version`.
+          files: dist/*.tar.gz
+          draft: false
+          prerelease: false

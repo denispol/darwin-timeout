@@ -1,0 +1,60 @@
+[package]
+name = "darwin-timeout"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.90"
+authors = ["denispol"]
+description = "Run a command with a time limit (GNU timeout clone for Darwin/Apple platforms)"
+license = "MIT"
+repository = "https://github.com/denispol/darwin-timeout"
+keywords = ["cli", "timeout", "process", "macos", "darwin"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+# Minimal clap features for faster compile and smaller binary
+clap = { version = "4.5.53", default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+    "env",
+] }
+
+# nix for signal handling (kqueue done via libc for API stability)
+nix = { version = "0.30.1", default-features = false, features = [
+    "signal",
+    "process",
+] }
+
+thiserror = "2.0.17"
+
+[dev-dependencies]
+assert_cmd = "2.0.17"
+predicates = "3.1.3"
+libc = "0.2.177"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
+
+# Faster dev builds - skip optimizations entirely
+[profile.dev]
+opt-level = 0
+debug = true
+
+# Tests with minimal optimization for reasonable speed
+[profile.test]
+opt-level = 1
+
+# Benchmarking with full optimizations
+[profile.bench]
+lto = true
+opt-level = 3
+
+[[bin]]
+name = "timeout"
+path = "src/main.rs"
