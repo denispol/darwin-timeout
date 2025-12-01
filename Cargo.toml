@@ -11,36 +11,21 @@ keywords = ["cli", "timeout", "process", "macos", "darwin"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-# Minimal clap features for faster compile and smaller binary
-clap = { version = "4.5.53", default-features = false, features = [
-    "std",
-    "derive",
-    "help",
-    "usage",
-    "error-context",
-    "env",
-] }
-
-# shell completion generation (bash, zsh, fish, powershell, elvish)
-clap_complete = "4.5"
-
-# nix for signal handling (kqueue done via libc for API stability)
-nix = { version = "0.30.1", default-features = false, features = [
-    "signal",
-    "process",
-] }
+# Direct libc for signal handling, process groups, kqueue
+# default-features = false for no_std compatibility
+libc = { version = "0.2.177", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2.0.17"
 predicates = "3.1.3"
-libc = "0.2.177"
 
 [profile.release]
-lto = true
-strip = true
-opt-level = "z"
-codegen-units = 1
-panic = "abort"
+opt-level = "z"         # size-optimized (perf impact minimal for this CLI)
+lto = "fat"             # cross-crate optimization
+codegen-units = 1       # single unit = better optimization
+panic = "abort"         # no unwind tables
+strip = "symbols"       # strip debug symbols
+overflow-checks = false # no runtime overflow checks
 
 # Faster dev builds - skip optimizations entirely
 [profile.dev]
