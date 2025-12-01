@@ -32,7 +32,7 @@ pub enum TimeoutError {
     CommandNotFound(String),
     PermissionDenied(String),
     SpawnError(std::io::Error),
-    SignalError(nix::Error),
+    SignalError(i32), // errno from libc signal calls
     ProcessGroupError(String),
     Internal(String),
 }
@@ -47,7 +47,13 @@ impl fmt::Display for TimeoutError {
             Self::CommandNotFound(s) => write!(f, "command not found: {s}"),
             Self::PermissionDenied(s) => write!(f, "permission denied: {s}"),
             Self::SpawnError(e) => write!(f, "failed to spawn process: {e}"),
-            Self::SignalError(e) => write!(f, "signal error: {e}"),
+            Self::SignalError(errno) => {
+                write!(
+                    f,
+                    "signal error: {}",
+                    std::io::Error::from_raw_os_error(*errno)
+                )
+            }
             Self::ProcessGroupError(s) => write!(f, "process group error: {s}"),
             Self::Internal(s) => write!(f, "internal error: {s}"),
         }
@@ -58,21 +64,14 @@ impl std::error::Error for TimeoutError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::SpawnError(e) => Some(e),
-            Self::SignalError(e) => Some(e),
             _ => None,
         }
     }
 }
 
 impl From<std::io::Error> for TimeoutError {
-    fn from(err: std::io::Error) -> Self {
-        Self::SpawnError(err)
-    }
-}
-
-impl From<nix::Error> for TimeoutError {
-    fn from(err: nix::Error) -> Self {
-        Self::SignalError(err)
+    fn from(e: std::io::Error) -> Self {
+        Self::SpawnError(e)
     }
 }
 

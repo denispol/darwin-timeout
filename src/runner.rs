@@ -29,14 +29,10 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use nix::libc;
-use nix::sys::signal::{Signal, killpg};
-use nix::unistd::Pid;
-
-use crate::args::Args;
+use crate::args::OwnedArgs;
 use crate::duration::{is_no_timeout, parse_duration};
 use crate::error::{Result, TimeoutError, exit_codes};
-use crate::signal::{parse_signal, signal_name, signal_number};
+use crate::signal::{Signal, parse_signal, signal_name, signal_number};
 
 /*
  * Self-pipe trick for signal forwarding.
@@ -110,7 +106,7 @@ pub fn setup_signal_forwarding() -> Option<RawFd> {
     // sigemptyset and sigaction are standard POSIX calls with valid args.
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = signal_handler as usize;
+        sa.sa_sigaction = signal_handler as *const () as usize;
         sa.sa_flags = libc::SA_RESTART;
         libc::sigemptyset(&raw mut sa.sa_mask);
 
@@ -189,12 +185,7 @@ fn read_signal_from_pipe(fd: RawFd) -> Option<Signal> {
     let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), 1) };
     if n > 0 {
         /* Decode the signal number written by signal_handler */
-        match buf[0] as i32 {
-            libc::SIGHUP => Some(Signal::SIGHUP),
-            libc::SIGINT => Some(Signal::SIGINT),
-            libc::SIGTERM => Some(Signal::SIGTERM),
-            _ => Some(Signal::SIGTERM), /* fallback for unknown */
-        }
+        Signal::try_from_raw(buf[0] as i32).or(Some(Signal::SIGTERM))
     } else {
         None
     }
@@ -366,7 +357,7 @@ pub struct RunConfig {
 
 impl RunConfig {
     /* build config from CLI args. fails if duration/signal is bogus. */
-    pub fn from_args(args: &Args, duration_str: &str) -> Result<Self> {
+    pub fn from_args(args: &OwnedArgs, duration_str: &str) -> Result<Self> {
         let timeout = parse_duration(duration_str)?;
         let signal = parse_signal(&args.signal)?;
         let kill_after = args
@@ -416,8 +407,9 @@ pub fn run_command(command: &str, args: &[String], config: &RunConfig) -> Result
         // because we're in the child and haven't called exec() yet.
         unsafe {
             cmd.pre_exec(|| {
-                nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(0))
-                    .map_err(|e| std::io::Error::other(format!("setpgid failed: {e}")))?;
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
@@ -471,7 +463,7 @@ fn monitor_with_timeout(child: &mut Child, config: &RunConfig) -> Result<RunResu
             if config.verbose && !config.quiet {
                 eprintln!("timeout: forwarding signal {} to command", signal_name(sig));
             }
-            send_signal(Pid::from_raw(pid), sig, config.foreground)?;
+            send_signal(pid, sig, config.foreground)?;
             let status = child.wait().ok();
             return Ok(RunResult::SignalForwarded {
                 signal: sig,
@@ -495,7 +487,7 @@ fn monitor_with_timeout(child: &mut Child, config: &RunConfig) -> Result<RunResu
         );
     }
 
-    send_signal(Pid::from_raw(pid), config.signal, config.foreground)?;
+    send_signal(pid, config.signal, config.foreground)?;
 
     /* if --kill-after, give it a grace period then escalate to SIGKILL */
     if let Some(kill_after) = config.kill_after {
@@ -515,7 +507,7 @@ fn monitor_with_timeout(child: &mut Child, config: &RunConfig) -> Result<RunResu
                 if config.verbose && !config.quiet {
                     eprintln!("timeout: forwarding signal {} to command", signal_name(sig));
                 }
-                send_signal(Pid::from_raw(pid), sig, config.foreground)?;
+                send_signal(pid, sig, config.foreground)?;
                 let status = child.wait().ok();
                 return Ok(RunResult::SignalForwarded {
                     signal: sig,
@@ -530,7 +522,7 @@ fn monitor_with_timeout(child: &mut Child, config: &RunConfig) -> Result<RunResu
             eprintln!("timeout: sending signal SIGKILL to command");
         }
 
-        send_signal(Pid::from_raw(pid), Signal::SIGKILL, config.foreground)?;
+        send_signal(pid, Signal::SIGKILL, config.foreground)?;
 
         let status = child.wait()?;
 
@@ -968,29 +960,47 @@ fn wait_for_hook_with_kqueue(child: &mut Child, timeout: Duration) -> HookWaitRe
  * killpg can fail with ESRCH even when process exists (race conditions),
  * so we fall back to regular kill().
  */
-fn send_signal(pid: Pid, signal: Signal, foreground: bool) -> Result<()> {
+fn send_signal(pid: i32, signal: Signal, foreground: bool) -> Result<()> {
+    let sig = signal.as_raw();
+
     if foreground {
-        match nix::sys::signal::kill(pid, signal) {
-            Ok(()) | Err(nix::Error::ESRCH) => Ok(()), /* success or already dead */
-            Err(e) => Err(TimeoutError::SignalError(e)),
+        // SAFETY: kill() is safe with any pid/signal combo, returns -1 on error
+        let ret = unsafe { libc::kill(pid, sig) };
+        if ret == 0 {
+            return Ok(());
         }
-    } else {
-        /*
-         * try process group first. if ESRCH, fall back to just the process.
-         * orphaned children get reparented to init - that's unix for you.
-         */
-        match killpg(pid, signal) {
-            Ok(()) => Ok(()),
-            Err(nix::Error::ESRCH) => {
-                /* group gone, try process directly */
-                match nix::sys::signal::kill(pid, signal) {
-                    Ok(()) | Err(nix::Error::ESRCH) => Ok(()),
-                    Err(e) => Err(TimeoutError::SignalError(e)),
-                }
-            }
-            Err(e) => Err(TimeoutError::SignalError(e)),
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if errno == libc::ESRCH {
+            return Ok(()); // already dead, that's fine
         }
+        return Err(TimeoutError::SignalError(errno));
     }
+
+    /*
+     * try process group first. if ESRCH, fall back to just the process.
+     * orphaned children get reparented to init - that's unix for you.
+     */
+    // SAFETY: killpg() is safe with any pid/signal combo, returns -1 on error
+    let ret = unsafe { libc::killpg(pid, sig) };
+    if ret == 0 {
+        return Ok(());
+    }
+
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    if errno == libc::ESRCH {
+        /* group gone, try process directly */
+        let ret = unsafe { libc::kill(pid, sig) };
+        if ret == 0 {
+            return Ok(());
+        }
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if errno == libc::ESRCH {
+            return Ok(()); // already dead
+        }
+        return Err(TimeoutError::SignalError(errno));
+    }
+
+    Err(TimeoutError::SignalError(errno))
 }
 
 #[cfg(test)]
@@ -1044,7 +1054,7 @@ mod tests {
     #[test]
     fn test_send_signal_to_nonexistent_process() {
         /* ESRCH should be handled gracefully */
-        let fake_pid = Pid::from_raw(99999);
+        let fake_pid = 99999i32;
         let result = send_signal(fake_pid, Signal::SIGTERM, true);
         assert!(result.is_ok(), "ESRCH should be handled gracefully");
     }

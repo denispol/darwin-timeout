@@ -3,16 +3,14 @@
  *
  * Parse "30s", "5m", "1.5h", "0.5d". No suffix means seconds.
  * Zero means run forever (useful for process group handling without timeout).
- * Cap at u64::MAX seconds so we don't panic. Case insensitive.
+ *
+ * Uses integer math internally (nanosecond precision) to avoid pulling in
+ * the ~6KB f64::from_str machinery from libstd.
  */
 
 use std::time::Duration;
 
 use crate::error::{Result, TimeoutError};
-
-/* cap at u64::MAX seconds - nobody needs a 292-year timeout */
-#[allow(clippy::cast_precision_loss)]
-const MAX_SECONDS: f64 = u64::MAX as f64;
 
 /// Parse "30", "30s", "1.5m", "2h", "0.5d". No suffix = seconds.
 ///
@@ -44,29 +42,15 @@ pub fn parse_duration(input: &str) -> Result<Duration> {
         )));
     }
 
-    let value: f64 = num_str
-        .parse()
-        .map_err(|_| TimeoutError::InvalidDuration(format!("invalid number '{num_str}'")))?;
+    /* parse as nanoseconds to preserve precision without floats */
+    let nanos = parse_decimal_to_nanos(num_str)?;
 
-    if value < 0.0 {
-        return Err(TimeoutError::NegativeDuration);
-    }
-
-    if value.is_nan() {
-        return Err(TimeoutError::InvalidDuration(
-            "NaN is not allowed".to_string(),
-        ));
-    }
-    if value.is_infinite() {
-        return Err(TimeoutError::DurationOverflow);
-    }
-
-    /* convert to seconds, case insensitive */
-    let multiplier = match suffix.to_ascii_lowercase().as_str() {
-        "" | "s" => 1.0,
-        "m" => 60.0,
-        "h" => 3600.0,
-        "d" => 86400.0,
+    /* multiplier in nanoseconds, case insensitive */
+    let multiplier: u128 = match suffix.to_ascii_lowercase().as_str() {
+        "" | "s" => 1_000_000_000, // 1 second
+        "m" => 60_000_000_000,     // 60 seconds
+        "h" => 3_600_000_000_000,  // 3600 seconds
+        "d" => 86_400_000_000_000, // 86400 seconds
         _ => {
             return Err(TimeoutError::InvalidDuration(format!(
                 "invalid suffix '{suffix}'"
@@ -74,13 +58,70 @@ pub fn parse_duration(input: &str) -> Result<Duration> {
         }
     };
 
-    let total_seconds = value * multiplier;
+    let total_nanos = nanos
+        .checked_mul(multiplier)
+        .and_then(|n| n.checked_div(1_000_000_000)) // scale back from fixed-point
+        .ok_or(TimeoutError::DurationOverflow)?;
 
-    if total_seconds > MAX_SECONDS {
+    /* cap at u64::MAX seconds */
+    if total_nanos > u64::MAX as u128 {
         return Err(TimeoutError::DurationOverflow);
     }
 
-    Ok(Duration::from_secs_f64(total_seconds))
+    let secs = (total_nanos / 1_000_000_000) as u64;
+    let subsec_nanos = (total_nanos % 1_000_000_000) as u32;
+
+    Ok(Duration::new(secs, subsec_nanos))
+}
+
+/// Parse decimal string to fixed-point nanoseconds (9 decimal places).
+/// "1.5" -> 1_500_000_000 (representing 1.5 in fixed-point)
+fn parse_decimal_to_nanos(s: &str) -> Result<u128> {
+    /* check for negative */
+    if s.starts_with('-') {
+        return Err(TimeoutError::NegativeDuration);
+    }
+
+    let (int_part, frac_part) = match s.find('.') {
+        Some(pos) => (&s[..pos], &s[pos + 1..]),
+        None => (s, ""),
+    };
+
+    /* parse integer part */
+    let int_val: u128 = if int_part.is_empty() {
+        0
+    } else {
+        int_part
+            .parse()
+            .map_err(|_| TimeoutError::InvalidDuration(format!("invalid number '{s}'")))?
+    };
+
+    /* parse fractional part, pad/truncate to 9 digits */
+    let frac_val: u128 = if frac_part.is_empty() {
+        0
+    } else {
+        /* stack buffer - no heap allocation */
+        let mut frac_buf = [b'0'; 9];
+        for (i, b) in frac_part.bytes().take(9).enumerate() {
+            if !b.is_ascii_digit() {
+                return Err(TimeoutError::InvalidDuration(format!(
+                    "invalid number '{s}'"
+                )));
+            }
+            frac_buf[i] = b;
+        }
+        /* SAFETY: frac_buf contains only ASCII digits */
+        let frac_str = unsafe { std::str::from_utf8_unchecked(&frac_buf) };
+        frac_str
+            .parse()
+            .map_err(|_| TimeoutError::InvalidDuration(format!("invalid number '{s}'")))?
+    };
+
+    /* combine: int_val * 10^9 + frac_val */
+    int_val
+        .checked_mul(1_000_000_000)
+        .and_then(|n| n.checked_add(frac_val))
+        .ok_or(TimeoutError::DurationOverflow)
 }
 
 /* find where the number ends and suffix begins */
