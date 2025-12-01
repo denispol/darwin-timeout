@@ -7,10 +7,11 @@
  * --json is for CI. Format is stable, don't change field names.
  */
 
+use std::io::{BufWriter, Write};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use darwin_timeout::args::Args;
+use darwin_timeout::args::{OwnedArgs, parse_args};
 use darwin_timeout::duration::parse_duration;
 use darwin_timeout::error::exit_codes;
 use darwin_timeout::runner::{RunConfig, RunResult, run_command, setup_signal_forwarding};
@@ -24,7 +25,7 @@ use darwin_timeout::runner::{RunConfig, RunResult, run_command, setup_signal_for
 /// is set, we shift: env becomes duration, the parsed "duration" becomes command.
 #[inline]
 fn resolve_args(
-    args: &Args,
+    args: &OwnedArgs,
     timeout_env: Option<&str>,
 ) -> (Option<String>, Option<String>, Vec<String>) {
     match (&args.duration, &args.command, timeout_env) {
@@ -68,7 +69,13 @@ fn resolve_args(
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse_args();
+    let args = match parse_args() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("timeout: {e}");
+            return ExitCode::from(exit_codes::INTERNAL_ERROR);
+        }
+    };
 
     /* handle --completions early and exit */
     if let Some(shell) = args.completions {
@@ -147,11 +154,14 @@ fn main() -> ExitCode {
 fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
     /* Schema version 2: added hook_* fields for on-timeout results */
     const SCHEMA_VERSION: u8 = 2;
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
 
     match result {
         RunResult::Completed(status) => {
             let code = status.code().unwrap_or(-1);
-            println!(
+            let _ = writeln!(
+                out,
                 r#"{{"schema_version":{},"status":"completed","exit_code":{},"elapsed_ms":{}}}"#,
                 SCHEMA_VERSION, code, elapsed_ms
             );
@@ -166,33 +176,42 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
             let status_code = status.and_then(|s| s.code()).unwrap_or(-1);
 
             /* Build hook fields if hook was run */
-            let hook_json = match hook {
-                Some(h) => format!(
-                    r#","hook_ran":{},"hook_exit_code":{},"hook_timed_out":{},"hook_elapsed_ms":{}"#,
-                    h.ran,
-                    h.exit_code.map_or("null".to_string(), |c| c.to_string()),
-                    h.timed_out,
-                    h.elapsed_ms
-                ),
-                None => String::new(),
-            };
+            let hook_json =
+                hook.as_ref()
+                    .map(|h| (h.ran, h.exit_code, h.timed_out, h.elapsed_ms));
 
-            println!(
-                r#"{{"schema_version":{},"status":"timeout","signal":"{}","signal_num":{},"killed":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}{}}}"#,
+            let _ = write!(
+                out,
+                r#"{{"schema_version":{},"status":"timeout","signal":"{}","signal_num":{},"killed":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}"#,
                 SCHEMA_VERSION,
                 darwin_timeout::signal::signal_name(*signal),
                 sig_num,
                 killed,
                 status_code,
                 exit_code,
-                elapsed_ms,
-                hook_json
+                elapsed_ms
             );
+            if let Some((ran, hook_exit, timed_out, hook_ms)) = hook_json {
+                let _ = match hook_exit {
+                    Some(c) => write!(
+                        out,
+                        r#","hook_ran":{},"hook_exit_code":{},"hook_timed_out":{},"hook_elapsed_ms":{}"#,
+                        ran, c, timed_out, hook_ms
+                    ),
+                    None => write!(
+                        out,
+                        r#","hook_ran":{},"hook_exit_code":null,"hook_timed_out":{},"hook_elapsed_ms":{}"#,
+                        ran, timed_out, hook_ms
+                    ),
+                };
+            }
+            let _ = writeln!(out, "}}");
         }
         RunResult::SignalForwarded { signal, status } => {
             let sig_num = darwin_timeout::signal::signal_number(*signal);
             let status_code = status.and_then(|s| s.code()).unwrap_or(-1);
-            println!(
+            let _ = writeln!(
+                out,
                 r#"{{"schema_version":{},"status":"signal_forwarded","signal":"{}","signal_num":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}}}"#,
                 SCHEMA_VERSION,
                 darwin_timeout::signal::signal_name(*signal),
@@ -203,11 +222,14 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
             );
         }
     }
+    /* BufWriter flushes on drop */
 }
 
 fn print_json_error(err: &darwin_timeout::error::TimeoutError, elapsed_ms: u64) {
     use darwin_timeout::error::{TimeoutError, exit_codes};
     const SCHEMA_VERSION: u8 = 2;
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
 
     let exit_code = match err {
         TimeoutError::CommandNotFound(_) => exit_codes::NOT_FOUND,
@@ -216,7 +238,8 @@ fn print_json_error(err: &darwin_timeout::error::TimeoutError, elapsed_ms: u64) 
     };
     /* Escape control characters for valid JSON */
     let msg = escape_json_string(&err.to_string());
-    println!(
+    let _ = writeln!(
+        out,
         r#"{{"schema_version":{},"status":"error","error":"{}","exit_code":{},"elapsed_ms":{}}}"#,
         SCHEMA_VERSION, msg, exit_code, elapsed_ms
     );

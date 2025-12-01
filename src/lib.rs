@@ -12,9 +12,8 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use darwin_timeout::{parse_duration, parse_signal};
+//! use darwin_timeout::{parse_duration, parse_signal, signal::Signal};
 //! use std::time::Duration;
-//! use nix::sys::signal::Signal;
 //!
 //! // Parse duration strings
 //! let dur = parse_duration("30s").unwrap();
