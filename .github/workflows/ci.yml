@@ -68,8 +68,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # tests run in debug mode - release builds use no_std with custom panic
+      # handler that conflicts with std's panic handler in test harness
       - name: Run tests
-        run: cargo test --release
+        run: cargo test
 
       - name: Verify binary
         run: |
