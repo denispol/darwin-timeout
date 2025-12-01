@@ -9,10 +9,11 @@
 # Prerequisites:
 #   - Rust toolchain with both targets installed:
 #     rustup target add aarch64-apple-darwin x86_64-apple-darwin
-#   - Xcode command line tools (for lipo)
+#   - For minimal builds: nightly toolchain + rust-src component
 #
 # Usage:
-#   ./scripts/build-universal.sh
+#   ./scripts/build-universal.sh          # stable build (~730KB universal)
+#   ./scripts/build-universal.sh --minimal # nightly build-std (~100KB universal)
 #
 # Output:
 #   target/universal/timeout - The universal binary
@@ -25,7 +26,18 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_ROOT"
 
+# Check for --minimal flag
+MINIMAL=false
+if [[ "${1:-}" == "--minimal" ]]; then
+    MINIMAL=true
+fi
+
 echo "=== Building timeout universal binary ==="
+if $MINIMAL; then
+    echo "    Mode: minimal (nightly + build-std)"
+else
+    echo "    Mode: stable"
+fi
 echo ""
 
 # Ensure both toolchains are installed
@@ -40,15 +52,43 @@ if ! rustup target list --installed | grep -q "x86_64-apple-darwin"; then
     rustup target add x86_64-apple-darwin
 fi
 
+if $MINIMAL; then
+    # Check nightly + rust-src for build-std
+    if ! rustup run nightly rustc --version &>/dev/null; then
+        echo "Installing nightly toolchain..."
+        rustup install nightly
+    fi
+    if ! rustup component list --toolchain nightly | grep -q "rust-src (installed)"; then
+        echo "Installing rust-src component..."
+        rustup component add rust-src --toolchain nightly
+    fi
+fi
+
 echo ""
+
+# Build flags for minimal mode
+# -Zlocation-detail=none: remove file/line info from panics
+# -Zfmt-debug=none: remove Debug formatting code
+# -Cpanic=immediate-abort: skip panic formatting entirely (requires -Zunstable-options)
+# build-std: rebuild libstd optimized for size
+# optimize_for_size: use smaller algorithms in libstd
+if $MINIMAL; then
+    RUSTFLAGS="-Zlocation-detail=none -Zfmt-debug=none -Zunstable-options -Cpanic=immediate-abort"
+    BUILD_STD_FLAGS="-Z build-std=std,panic_abort -Z build-std-features=optimize_for_size"
+    CARGO="cargo +nightly"
+else
+    RUSTFLAGS=""
+    BUILD_STD_FLAGS=""
+    CARGO="cargo"
+fi
 
 # Build for ARM64 (Apple Silicon)
 echo "Building for aarch64-apple-darwin (Apple Silicon)..."
-cargo build --release --target aarch64-apple-darwin
+RUSTFLAGS="$RUSTFLAGS" $CARGO build --release $BUILD_STD_FLAGS --target aarch64-apple-darwin
 
 # Build for x86_64 (Intel)
 echo "Building for x86_64-apple-darwin (Intel)..."
-cargo build --release --target x86_64-apple-darwin
+RUSTFLAGS="$RUSTFLAGS" $CARGO build --release $BUILD_STD_FLAGS --target x86_64-apple-darwin
 
 echo ""
 
@@ -62,8 +102,9 @@ lipo -create \
     target/x86_64-apple-darwin/release/timeout \
     -output target/universal/timeout
 
-# Strip is already done by the release profile, but ensure it
-strip target/universal/timeout 2>/dev/null || true
+# aggressive strip: -x removes local symbols, -S removes debug symbols
+# (release profile already strips, this catches anything lipo preserved)
+strip -x -S target/universal/timeout 2>/dev/null || true
 
 # Optional: ad-hoc codesign for faster first launch
 echo "Signing binary..."
