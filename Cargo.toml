@@ -27,8 +27,6 @@ nix = { version = "0.30.1", default-features = false, features = [
     "process",
 ] }
 
-thiserror = "2.0.17"
-
 [dev-dependencies]
 assert_cmd = "2.0.17"
 predicates = "3.1.3"

@@ -7,8 +7,8 @@
  * Don't change them. You'll break CI pipelines.
  */
 
+use std::fmt;
 use std::process::ExitCode;
-use thiserror::Error;
 
 /// exit codes per GNU coreutils convention. don't change these.
 pub mod exit_codes {
@@ -23,37 +23,57 @@ pub mod exit_codes {
 }
 
 /* everything that can go wrong */
-#[derive(Error, Debug)]
+#[derive(Debug)]
 pub enum TimeoutError {
-    #[error("invalid duration: {0}")]
     InvalidDuration(String),
-
-    #[error("invalid duration: negative values not allowed")]
     NegativeDuration,
-
-    #[error("invalid duration: value too large")]
     DurationOverflow,
-
-    #[error("invalid signal: {0}")]
     InvalidSignal(String),
-
-    #[error("command not found: {0}")]
     CommandNotFound(String),
-
-    #[error("permission denied: {0}")]
     PermissionDenied(String),
-
-    #[error("failed to spawn process: {0}")]
-    SpawnError(#[from] std::io::Error),
-
-    #[error("signal error: {0}")]
-    SignalError(#[from] nix::Error),
-
-    #[error("process group error: {0}")]
+    SpawnError(std::io::Error),
+    SignalError(nix::Error),
     ProcessGroupError(String),
-
-    #[error("internal error: {0}")]
     Internal(String),
+}
+
+impl fmt::Display for TimeoutError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDuration(s) => write!(f, "invalid duration: {s}"),
+            Self::NegativeDuration => write!(f, "invalid duration: negative values not allowed"),
+            Self::DurationOverflow => write!(f, "invalid duration: value too large"),
+            Self::InvalidSignal(s) => write!(f, "invalid signal: {s}"),
+            Self::CommandNotFound(s) => write!(f, "command not found: {s}"),
+            Self::PermissionDenied(s) => write!(f, "permission denied: {s}"),
+            Self::SpawnError(e) => write!(f, "failed to spawn process: {e}"),
+            Self::SignalError(e) => write!(f, "signal error: {e}"),
+            Self::ProcessGroupError(s) => write!(f, "process group error: {s}"),
+            Self::Internal(s) => write!(f, "internal error: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for TimeoutError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::SpawnError(e) => Some(e),
+            Self::SignalError(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for TimeoutError {
+    fn from(err: std::io::Error) -> Self {
+        Self::SpawnError(err)
+    }
+}
+
+impl From<nix::Error> for TimeoutError {
+    fn from(err: nix::Error) -> Self {
+        Self::SignalError(err)
+    }
 }
 
 impl TimeoutError {
