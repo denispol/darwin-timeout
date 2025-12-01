@@ -24,6 +24,7 @@ use core::alloc::{GlobalAlloc, Layout};
 /// - realloc with null acts as malloc, with zero size acts as free
 ///
 /// Thread safety: libc's allocator is thread-safe on all supported platforms.
+#[allow(dead_code)] // only used in release builds via #[global_allocator]
 pub struct SystemAlloc;
 
 // SAFETY: GlobalAlloc requires the implementor to be thread-safe. libc's malloc/free
@@ -90,6 +91,6 @@ unsafe impl GlobalAlloc for SystemAlloc {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(debug_assertions, test)))]
 #[global_allocator]
 static ALLOCATOR: SystemAlloc = SystemAlloc;

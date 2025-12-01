@@ -17,22 +17,21 @@
  * Signal forwarding: if timeout gets SIGTERM (docker stop, system shutdown),
  * we forward it to the child before dying. Otherwise you get orphans.
  * Self-pipe trick: handler writes to pipe, kqueue watches it.
- *
- * Panic handler: if we panic, still kill and reap the child. No zombies.
  */
 
-use std::io::ErrorKind;
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::process::CommandExt;
-use std::panic::{self, AssertUnwindSafe};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::OnceLock;
-use std::time::Duration;
+use alloc::format;
+use alloc::string::{String, ToString};
+use core::sync::atomic::{AtomicI32, Ordering};
+use core::time::Duration;
 
 use crate::args::OwnedArgs;
 use crate::duration::{is_no_timeout, parse_duration};
 use crate::error::{Result, TimeoutError, exit_codes};
+use crate::process::{RawChild, RawExitStatus, SpawnError, spawn_command};
 use crate::signal::{Signal, parse_signal, signal_name, signal_number};
+use crate::sync::AtomicOnce;
+
+type RawFd = i32;
 
 /*
  * Self-pipe trick for signal forwarding.
@@ -50,7 +49,7 @@ use crate::signal::{Signal, parse_signal, signal_name, signal_number};
  * We forward SIGTERM, SIGINT, SIGHUP. The "please die" signals.
  */
 
-static SIGNAL_PIPE: OnceLock<RawFd> = OnceLock::new();
+static SIGNAL_PIPE: AtomicOnce<RawFd> = AtomicOnce::new();
 
 /// Set up signal handlers for forwarding SIGTERM/SIGINT/SIGHUP to child.
 /// Returns fd that becomes readable when signal arrives. Call before spawn.
@@ -99,27 +98,27 @@ pub fn setup_signal_forwarding() -> Option<RawFd> {
     /* Store write_fd for signal handler AFTER confirming we own the pipe slot.
      * This prevents a race where the signal handler could see a write_fd
      * that's about to be closed by a concurrent re-entry. */
-    SIGNAL_WRITE_FD.store(write_fd, std::sync::atomic::Ordering::SeqCst);
+    SIGNAL_WRITE_FD.store(write_fd, Ordering::SeqCst);
 
     // SAFETY: sigaction struct is zeroed then properly initialized.
     // signal_handler is an extern "C" fn with correct signature.
     // sigemptyset and sigaction are standard POSIX calls with valid args.
     unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
+        let mut sa: libc::sigaction = core::mem::zeroed();
         sa.sa_sigaction = signal_handler as *const () as usize;
         sa.sa_flags = libc::SA_RESTART;
         libc::sigemptyset(&raw mut sa.sa_mask);
 
-        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
-        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
-        libc::sigaction(libc::SIGHUP, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &sa, core::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &sa, core::ptr::null_mut());
+        libc::sigaction(libc::SIGHUP, &sa, core::ptr::null_mut());
     }
 
     Some(read_fd)
 }
 
 /* Global write fd for signal handler (atomic for signal safety) */
-static SIGNAL_WRITE_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+static SIGNAL_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 
 /// Close signal pipe fds and reset handlers to default.
 ///
@@ -129,7 +128,7 @@ static SIGNAL_WRITE_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::Atomic
 /// Don't call while another thread is inside `run_command`.
 pub fn cleanup_signal_forwarding() {
     /* Close write fd first to prevent signal handler from writing to closed fd */
-    let write_fd = SIGNAL_WRITE_FD.swap(-1, std::sync::atomic::Ordering::SeqCst);
+    let write_fd = SIGNAL_WRITE_FD.swap(-1, Ordering::SeqCst);
     if write_fd >= 0 {
         // SAFETY: write_fd was set by setup_signal_forwarding and is valid.
         unsafe {
@@ -137,7 +136,7 @@ pub fn cleanup_signal_forwarding() {
         }
     }
 
-    /* Read fd is in SIGNAL_PIPE - we can't "unset" OnceLock, but we can close it.
+    /* Read fd is in SIGNAL_PIPE - we can't "unset" AtomicOnce, but we can close it.
      * The fd will be invalid if used again, but setup_signal_forwarding checks
      * if SIGNAL_PIPE is already set and returns early, so this is fine. */
     if let Some(&read_fd) = SIGNAL_PIPE.get() {
@@ -150,20 +149,20 @@ pub fn cleanup_signal_forwarding() {
     /* Reset signal handlers to default */
     // SAFETY: SIG_DFL is the standard default handler, sigaction is safe with valid args.
     unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
+        let mut sa: libc::sigaction = core::mem::zeroed();
         sa.sa_sigaction = libc::SIG_DFL;
         sa.sa_flags = 0;
         libc::sigemptyset(&raw mut sa.sa_mask);
 
-        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
-        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
-        libc::sigaction(libc::SIGHUP, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &sa, core::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &sa, core::ptr::null_mut());
+        libc::sigaction(libc::SIGHUP, &sa, core::ptr::null_mut());
     }
 }
 
 /* Minimal signal handler - write the signal number to the pipe */
 extern "C" fn signal_handler(sig: i32) {
-    let fd = SIGNAL_WRITE_FD.load(std::sync::atomic::Ordering::SeqCst);
+    let fd = SIGNAL_WRITE_FD.load(Ordering::SeqCst);
     if fd >= 0 {
         // SAFETY: fd was validated >= 0 and set by setup_signal_forwarding().
         // write() with a 1-byte buffer is async-signal-safe per POSIX.
@@ -220,7 +219,7 @@ unsafe extern "C" {
 
 /* get timebase ratio, cached forever */
 fn get_timebase_info() -> (u64, u64) {
-    static TIMEBASE: OnceLock<(u64, u64)> = OnceLock::new();
+    static TIMEBASE: AtomicOnce<(u64, u64)> = AtomicOnce::new();
 
     *TIMEBASE.get_or_init(|| {
         let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
@@ -274,17 +273,17 @@ pub struct HookResult {
 /* what happened when we ran the command */
 #[derive(Debug)]
 pub enum RunResult {
-    Completed(ExitStatus),
+    Completed(RawExitStatus),
     TimedOut {
         signal: Signal,
         killed: bool, /* true if we had to escalate to SIGKILL */
-        status: Option<ExitStatus>,
+        status: Option<RawExitStatus>,
         hook: Option<HookResult>, /* on-timeout hook result if configured */
     },
     SignalForwarded {
         /* we got SIGTERM/SIGINT/SIGHUP, passed it on */
         signal: Signal,
-        status: Option<ExitStatus>,
+        status: Option<RawExitStatus>,
     },
 }
 
@@ -293,7 +292,7 @@ impl RunResult {
     #[must_use]
     pub fn exit_code(&self, preserve_status: bool, timeout_exit_code: u8) -> u8 {
         match self {
-            Self::Completed(status) => status_to_exit_code(*status),
+            Self::Completed(status) => status_to_exit_code(status),
             Self::TimedOut {
                 signal,
                 killed,
@@ -306,7 +305,7 @@ impl RunResult {
                             let sig = if *killed { Signal::SIGKILL } else { *signal };
                             signal_exit_code(sig)
                         },
-                        status_to_exit_code,
+                        |s| status_to_exit_code(&s),
                     )
                 } else {
                     timeout_exit_code
@@ -314,7 +313,7 @@ impl RunResult {
             }
             Self::SignalForwarded { signal, status } => {
                 /* We got killed by a signal - return 128 + signum like the child would */
-                status.map_or_else(|| signal_exit_code(*signal), status_to_exit_code)
+                status.map_or_else(|| signal_exit_code(*signal), |s| status_to_exit_code(&s))
             }
         }
     }
@@ -329,13 +328,9 @@ const fn signal_exit_code(signal: Signal) -> u8 {
 
 /* exit status to 8-bit code, POSIX style */
 #[allow(clippy::cast_sign_loss)]
-fn status_to_exit_code(status: ExitStatus) -> u8 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(sig) = status.signal() {
-            return ((128i32 + sig) & 0xFF) as u8;
-        }
+fn status_to_exit_code(status: &RawExitStatus) -> u8 {
+    if let Some(sig) = status.signal() {
+        return ((128i32 + sig) & 0xFF) as u8;
     }
 
     (status.code().unwrap_or(1) & 0xFF) as u8
@@ -369,9 +364,10 @@ impl RunConfig {
 
         /* Warn if on-timeout-limit exceeds main timeout (when hook is set) */
         if args.on_timeout.is_some() && on_timeout_limit > timeout && !is_no_timeout(&timeout) {
-            eprintln!(
+            crate::eprintln!(
                 "warning: --on-timeout-limit ({}) exceeds main timeout ({})",
-                args.on_timeout_limit, duration_str
+                args.on_timeout_limit,
+                duration_str
             );
         }
 
@@ -389,65 +385,38 @@ impl RunConfig {
     }
 }
 
-/// Spawn command and enforce timeout. Panic-safe: always cleans up child.
+/// Spawn command and enforce timeout.
 ///
 /// Errors: command not found, permission denied, spawn failed, signal failed.
 pub fn run_command(command: &str, args: &[String], config: &RunConfig) -> Result<RunResult> {
-    let mut cmd = Command::new(command);
-    cmd.args(args);
-
-    cmd.stdin(Stdio::inherit());
-    cmd.stdout(Stdio::inherit());
-    cmd.stderr(Stdio::inherit());
-
     /* put child in its own process group unless foreground mode */
-    if !config.foreground {
-        // SAFETY: pre_exec runs after fork() in the child process before exec().
-        // setpgid(0, 0) puts the child in its own process group. This is safe
-        // because we're in the child and haven't called exec() yet.
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setpgid(0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
+    let use_process_group = !config.foreground;
 
-    let mut child = cmd.spawn().map_err(|e| match e.kind() {
-        ErrorKind::NotFound => TimeoutError::CommandNotFound(command.to_string()),
-        ErrorKind::PermissionDenied => TimeoutError::PermissionDenied(command.to_string()),
-        _ => TimeoutError::SpawnError(e),
+    let mut child = spawn_command(command, args, use_process_group).map_err(|e| match e {
+        SpawnError::NotFound(s) => TimeoutError::CommandNotFound(s),
+        SpawnError::PermissionDenied(s) => TimeoutError::PermissionDenied(s),
+        SpawnError::Spawn(errno) => TimeoutError::SpawnError(errno),
+        SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
+        SpawnError::InvalidArg => TimeoutError::Internal("invalid argument".to_string()),
     })?;
 
     /* zero timeout = run forever */
     if is_no_timeout(&config.timeout) {
-        let status = child.wait()?;
+        let status = child.wait().map_err(|e| match e {
+            SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
+            _ => TimeoutError::Internal("wait failed".to_string()),
+        })?;
         return Ok(RunResult::Completed(status));
     }
 
-    /* wrap in panic handler to ensure child cleanup */
-    let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        monitor_with_timeout(&mut child, config)
-    }));
-
-    match result {
-        Ok(r) => r,
-        Err(panic_payload) => {
-            /* panicked - kill child and rethrow */
-            let _ = child.kill();
-            let _ = child.wait();
-            panic::resume_unwind(panic_payload);
-        }
-    }
+    monitor_with_timeout(&mut child, config)
 }
 
 /*
  * main timeout logic using kqueue. kernel wakes us on process exit
  * or timer expiry - zero CPU while waiting.
  */
-fn monitor_with_timeout(child: &mut Child, config: &RunConfig) -> Result<RunResult> {
+fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunResult> {
     #[allow(clippy::cast_possible_wrap)]
     let pid = child.id() as i32;
 
@@ -461,7 +430,7 @@ fn monitor_with_timeout(child: &mut Child, config: &RunConfig) -> Result<RunResu
         WaitResult::ReceivedSignal(sig) => {
             /* We received SIGTERM/SIGINT/SIGHUP - forward to child and exit */
             if config.verbose && !config.quiet {
-                eprintln!("timeout: forwarding signal {} to command", signal_name(sig));
+                crate::eprintln!("timeout: forwarding signal {} to command", signal_name(sig));
             }
             send_signal(pid, sig, config.foreground)?;
             let status = child.wait().ok();
@@ -481,7 +450,7 @@ fn monitor_with_timeout(child: &mut Child, config: &RunConfig) -> Result<RunResu
 
     /* time's up, send the signal */
     if config.verbose && !config.quiet {
-        eprintln!(
+        crate::eprintln!(
             "timeout: sending signal {} to command",
             signal_name(config.signal)
         );
@@ -505,7 +474,7 @@ fn monitor_with_timeout(child: &mut Child, config: &RunConfig) -> Result<RunResu
             WaitResult::ReceivedSignal(sig) => {
                 /* Forward signal during grace period */
                 if config.verbose && !config.quiet {
-                    eprintln!("timeout: forwarding signal {} to command", signal_name(sig));
+                    crate::eprintln!("timeout: forwarding signal {} to command", signal_name(sig));
                 }
                 send_signal(pid, sig, config.foreground)?;
                 let status = child.wait().ok();
@@ -519,12 +488,15 @@ fn monitor_with_timeout(child: &mut Child, config: &RunConfig) -> Result<RunResu
 
         /* still alive? SIGKILL it */
         if config.verbose && !config.quiet {
-            eprintln!("timeout: sending signal SIGKILL to command");
+            crate::eprintln!("timeout: sending signal SIGKILL to command");
         }
 
         send_signal(pid, Signal::SIGKILL, config.foreground)?;
 
-        let status = child.wait()?;
+        let status = child.wait().map_err(|e| match e {
+            SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
+            _ => TimeoutError::Internal("wait failed".to_string()),
+        })?;
 
         Ok(RunResult::TimedOut {
             signal: config.signal,
@@ -534,7 +506,10 @@ fn monitor_with_timeout(child: &mut Child, config: &RunConfig) -> Result<RunResu
         })
     } else {
         /* no kill-after, just wait for it to die */
-        let status = child.wait()?;
+        let status = child.wait().map_err(|e| match e {
+            SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
+            _ => TimeoutError::Internal("wait failed".to_string()),
+        })?;
 
         Ok(RunResult::TimedOut {
             signal: config.signal,
@@ -549,10 +524,20 @@ fn monitor_with_timeout(child: &mut Child, config: &RunConfig) -> Result<RunResu
  * What happened when we waited on the process.
  */
 enum WaitResult {
-    Exited(ExitStatus),
+    Exited(RawExitStatus),
     TimedOut,
     /// Received a signal that should be forwarded to the child
     ReceivedSignal(Signal),
+}
+
+/* get errno - on macOS this is a thread-local via __error() */
+#[inline]
+fn errno() -> i32 {
+    unsafe extern "C" {
+        fn __error() -> *mut i32;
+    }
+    // SAFETY: __error always returns valid pointer on macOS
+    unsafe { *__error() }
 }
 
 /*
@@ -560,7 +545,7 @@ enum WaitResult {
  * for nanosecond precision, and optionally EVFILT_READ for signal pipe.
  * Direct libc because nix kqueue API keeps changing.
  */
-fn wait_with_kqueue(child: &mut Child, pid: i32, timeout: Duration) -> Result<WaitResult> {
+fn wait_with_kqueue(child: &mut RawChild, pid: i32, timeout: Duration) -> Result<WaitResult> {
     let start_ns = precise_now_ns();
     let timeout_ns = duration_to_ns(timeout);
 
@@ -572,12 +557,10 @@ fn wait_with_kqueue(child: &mut Child, pid: i32, timeout: Duration) -> Result<Wa
     let kq = unsafe { libc::kqueue() };
     if kq < 0 {
         return Err(TimeoutError::Internal(format!(
-            "kqueue failed: {}",
-            std::io::Error::last_os_error()
+            "kqueue failed: errno {}",
+            errno()
         )));
     }
-    // SAFETY: kq is a valid fd (checked above), OwnedFd takes ownership and will close it.
-    let kq_fd = unsafe { OwnedFd::from_raw_fd(kq) };
 
     /*
      * kqueue filters:
@@ -599,7 +582,7 @@ fn wait_with_kqueue(child: &mut Child, pid: i32, timeout: Duration) -> Result<Wa
             flags: libc::EV_ADD | libc::EV_ONESHOT,
             fflags: libc::NOTE_EXIT,
             data: 0,
-            udata: std::ptr::null_mut(),
+            udata: core::ptr::null_mut(),
         },
         /* High-precision timer - data is nanoseconds */
         libc::kevent {
@@ -609,7 +592,7 @@ fn wait_with_kqueue(child: &mut Child, pid: i32, timeout: Duration) -> Result<Wa
             fflags: libc::NOTE_NSECONDS,
             /* Safe: duration_to_ns clamps to isize::MAX */
             data: timeout_ns as isize,
-            udata: std::ptr::null_mut(),
+            udata: core::ptr::null_mut(),
         },
         /* Signal pipe watcher (may be unused if no signal fd) */
         libc::kevent {
@@ -618,7 +601,7 @@ fn wait_with_kqueue(child: &mut Child, pid: i32, timeout: Duration) -> Result<Wa
             flags: if signal_fd.is_some() { libc::EV_ADD } else { 0 },
             fflags: 0,
             data: 0,
-            udata: std::ptr::null_mut(),
+            udata: core::ptr::null_mut(),
         },
     ];
     let num_changes = if signal_fd.is_some() { 3 } else { 2 };
@@ -630,7 +613,7 @@ fn wait_with_kqueue(child: &mut Child, pid: i32, timeout: Duration) -> Result<Wa
         flags: 0,
         fflags: 0,
         data: 0,
-        udata: std::ptr::null_mut(),
+        udata: core::ptr::null_mut(),
     };
 
     /*
@@ -647,6 +630,8 @@ fn wait_with_kqueue(child: &mut Child, pid: i32, timeout: Duration) -> Result<Wa
         /* check if we've passed deadline */
         let now_ns = precise_now_ns();
         if now_ns >= deadline_ns {
+            // SAFETY: kq is a valid fd, close is always safe
+            unsafe { libc::close(kq) };
             return Ok(WaitResult::TimedOut);
         }
         let remaining_ns = deadline_ns.saturating_sub(now_ns);
@@ -657,37 +642,46 @@ fn wait_with_kqueue(child: &mut Child, pid: i32, timeout: Duration) -> Result<Wa
             changes[1].data = remaining_ns.min(MAX_TIMER_NS) as isize;
         }
 
-        // SAFETY: kq_fd is a valid kqueue fd. changes is a valid slice of kevent structs.
+        // SAFETY: kq is a valid kqueue fd. changes is a valid slice of kevent structs.
         // event is a valid buffer for one kevent. Timeout is null (wait forever).
         // kevent() is the standard BSD API for event notification.
         #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
         let n = unsafe {
             libc::kevent(
-                kq_fd.as_raw_fd(),
+                kq,
                 changes.as_ptr(),
                 num_changes,
                 &raw mut event,
                 1,
-                std::ptr::null(), /* No timeout - timer event handles it */
+                core::ptr::null(), /* No timeout - timer event handles it */
             )
         };
 
         if n < 0 {
-            let err = std::io::Error::last_os_error();
+            let err = errno();
             /* EINTR: signal interrupted us, retry with remaining time */
-            if err.raw_os_error() == Some(libc::EINTR) {
+            if err == libc::EINTR {
                 continue;
             }
             /* ESRCH: process already gone, reap it */
-            if err.raw_os_error() == Some(libc::ESRCH) {
-                if let Some(status) = child.try_wait()? {
+            if err == libc::ESRCH {
+                // SAFETY: kq is a valid fd
+                unsafe { libc::close(kq) };
+                if let Ok(Some(status)) = child.try_wait() {
                     return Ok(WaitResult::Exited(status));
                 }
                 /* race: kernel says dead but try_wait says no - use blocking wait */
-                let status = child.wait()?;
+                let status = child.wait().map_err(|e| match e {
+                    SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
+                    _ => TimeoutError::Internal("wait failed".to_string()),
+                })?;
                 return Ok(WaitResult::Exited(status));
             }
-            return Err(TimeoutError::Internal(format!("kevent failed: {err}")));
+            // SAFETY: kq is a valid fd
+            unsafe { libc::close(kq) };
+            return Err(TimeoutError::Internal(format!(
+                "kevent failed: errno {err}"
+            )));
         }
 
         /* got result, exit loop */
@@ -700,22 +694,35 @@ fn wait_with_kqueue(child: &mut Child, pid: i32, timeout: Duration) -> Result<Wa
         let err_code = event.data as i32;
         /* ESRCH = process gone, that's fine */
         if err_code != libc::ESRCH {
+            // SAFETY: kq is a valid fd
+            unsafe { libc::close(kq) };
             return Err(TimeoutError::Internal(format!(
-                "kqueue event registration failed: {}",
-                std::io::Error::from_raw_os_error(err_code)
+                "kqueue event registration failed: errno {}",
+                err_code
             )));
         }
         /* ESRCH - reap it */
-        if let Some(status) = child.try_wait()? {
+        // SAFETY: kq is a valid fd
+        unsafe { libc::close(kq) };
+        if let Ok(Some(status)) = child.try_wait() {
             return Ok(WaitResult::Exited(status));
         }
-        let status = child.wait()?;
+        let status = child.wait().map_err(|e| match e {
+            SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
+            _ => TimeoutError::Internal("wait failed".to_string()),
+        })?;
         return Ok(WaitResult::Exited(status));
     }
 
+    // SAFETY: kq is a valid fd
+    unsafe { libc::close(kq) };
+
     /* EVFILT_PROC = exited, EVFILT_TIMER = timed out, EVFILT_READ = signal received */
     if event.filter == libc::EVFILT_PROC {
-        let status = child.wait()?;
+        let status = child.wait().map_err(|e| match e {
+            SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
+            _ => TimeoutError::Internal("wait failed".to_string()),
+        })?;
         return Ok(WaitResult::Exited(status));
     }
 
@@ -744,26 +751,21 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
     /* Expand %p to PID, %% to literal % */
     let expanded_cmd = cmd
         .replace("%%", "\x00PERCENT\x00") /* placeholder for %% */
-        .replace("%p", &pid.to_string())
+        .replace("%p", &format!("{}", pid))
         .replace("\x00PERCENT\x00", "%"); /* restore literal % */
 
     if config.verbose && !config.quiet {
-        eprintln!("timeout: running on-timeout hook: {}", expanded_cmd);
+        crate::eprintln!("timeout: running on-timeout hook: {}", expanded_cmd);
     }
 
     /* Run via shell to support complex commands */
-    let spawn_result = Command::new("sh")
-        .args(["-c", &expanded_cmd])
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn();
+    let spawn_result = spawn_command("sh", &[String::from("-c"), expanded_cmd], false);
 
     let mut child = match spawn_result {
         Ok(c) => c,
         Err(e) => {
             if config.verbose && !config.quiet {
-                eprintln!("timeout: on-timeout hook failed to start: {}", e);
+                crate::eprintln!("timeout: on-timeout hook failed to start: {:?}", e);
             }
             return HookResult {
                 ran: false,
@@ -786,7 +788,7 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
                 && let Some(code) = exit_code
                 && code != 0
             {
-                eprintln!("timeout: on-timeout hook exited with code {}", code);
+                crate::eprintln!("timeout: on-timeout hook exited with code {}", code);
             }
             HookResult {
                 ran: true,
@@ -797,7 +799,7 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
         }
         HookWaitResult::TimedOut => {
             if config.verbose && !config.quiet {
-                eprintln!("timeout: on-timeout hook timed out, killing");
+                crate::eprintln!("timeout: on-timeout hook timed out, killing");
             }
             let _ = child.kill();
             let _ = child.wait();
@@ -810,7 +812,7 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
         }
         HookWaitResult::Error(e) => {
             if config.verbose && !config.quiet {
-                eprintln!("timeout: on-timeout hook wait failed: {}", e);
+                crate::eprintln!("timeout: on-timeout hook wait failed: {}", e);
             }
             HookResult {
                 ran: true,
@@ -824,7 +826,7 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
 
 /* Result of waiting for hook process */
 enum HookWaitResult {
-    Exited(ExitStatus),
+    Exited(RawExitStatus),
     TimedOut,
     Error(String),
 }
@@ -833,7 +835,7 @@ enum HookWaitResult {
  * Wait for hook process using kqueue - zero CPU while waiting.
  * Simpler than wait_with_kqueue since we don't need signal forwarding.
  */
-fn wait_for_hook_with_kqueue(child: &mut Child, timeout: Duration) -> HookWaitResult {
+fn wait_for_hook_with_kqueue(child: &mut RawChild, timeout: Duration) -> HookWaitResult {
     #[allow(clippy::cast_possible_wrap)]
     let pid = child.id() as i32;
     let start_ns = precise_now_ns();
@@ -843,12 +845,8 @@ fn wait_for_hook_with_kqueue(child: &mut Child, timeout: Duration) -> HookWaitRe
     /* create kqueue fd */
     let kq = unsafe { libc::kqueue() };
     if kq < 0 {
-        return HookWaitResult::Error(format!(
-            "kqueue failed: {}",
-            std::io::Error::last_os_error()
-        ));
+        return HookWaitResult::Error(format!("kqueue failed: errno {}", errno()));
     }
-    let kq_fd = unsafe { OwnedFd::from_raw_fd(kq) };
 
     /* Watch for process exit and set timer */
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
@@ -859,7 +857,7 @@ fn wait_for_hook_with_kqueue(child: &mut Child, timeout: Duration) -> HookWaitRe
             flags: libc::EV_ADD | libc::EV_ONESHOT,
             fflags: libc::NOTE_EXIT,
             data: 0,
-            udata: std::ptr::null_mut(),
+            udata: core::ptr::null_mut(),
         },
         libc::kevent {
             ident: 2, /* different from main timer */
@@ -867,7 +865,7 @@ fn wait_for_hook_with_kqueue(child: &mut Child, timeout: Duration) -> HookWaitRe
             flags: libc::EV_ADD | libc::EV_ONESHOT,
             fflags: libc::NOTE_NSECONDS,
             data: timeout_ns as isize,
-            udata: std::ptr::null_mut(),
+            udata: core::ptr::null_mut(),
         },
     ];
 
@@ -877,13 +875,14 @@ fn wait_for_hook_with_kqueue(child: &mut Child, timeout: Duration) -> HookWaitRe
         flags: 0,
         fflags: 0,
         data: 0,
-        udata: std::ptr::null_mut(),
+        udata: core::ptr::null_mut(),
     };
 
     loop {
         /* Recalculate remaining time (handles EINTR correctly) */
         let now_ns = precise_now_ns();
         if now_ns >= deadline_ns {
+            unsafe { libc::close(kq) };
             return HookWaitResult::TimedOut;
         }
         let remaining_ns = deadline_ns.saturating_sub(now_ns);
@@ -892,32 +891,34 @@ fn wait_for_hook_with_kqueue(child: &mut Child, timeout: Duration) -> HookWaitRe
         #[allow(clippy::cast_possible_wrap)]
         let n = unsafe {
             libc::kevent(
-                kq_fd.as_raw_fd(),
+                kq,
                 changes.as_ptr(),
                 changes.len() as i32,
                 &raw mut event,
                 1,
-                std::ptr::null(),
+                core::ptr::null(),
             )
         };
 
         if n < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EINTR) {
+            let err = errno();
+            if err == libc::EINTR {
                 continue;
             }
-            if err.raw_os_error() == Some(libc::ESRCH) {
+            if err == libc::ESRCH {
                 /* Process already gone */
+                unsafe { libc::close(kq) };
                 return match child.try_wait() {
                     Ok(Some(status)) => HookWaitResult::Exited(status),
                     Ok(None) => match child.wait() {
                         Ok(status) => HookWaitResult::Exited(status),
-                        Err(e) => HookWaitResult::Error(e.to_string()),
+                        Err(e) => HookWaitResult::Error(format!("{:?}", e)),
                     },
-                    Err(e) => HookWaitResult::Error(e.to_string()),
+                    Err(e) => HookWaitResult::Error(format!("{:?}", e)),
                 };
             }
-            return HookWaitResult::Error(format!("kevent failed: {}", err));
+            unsafe { libc::close(kq) };
+            return HookWaitResult::Error(format!("kevent failed: errno {}", err));
         }
         break;
     }
@@ -926,22 +927,22 @@ fn wait_for_hook_with_kqueue(child: &mut Child, timeout: Duration) -> HookWaitRe
     if (event.flags & libc::EV_ERROR) != 0 {
         #[allow(clippy::cast_possible_truncation)]
         let err_code = event.data as i32;
+        unsafe { libc::close(kq) };
         if err_code == libc::ESRCH {
             return match child.wait() {
                 Ok(status) => HookWaitResult::Exited(status),
-                Err(e) => HookWaitResult::Error(e.to_string()),
+                Err(e) => HookWaitResult::Error(format!("{:?}", e)),
             };
         }
-        return HookWaitResult::Error(format!(
-            "kqueue registration failed: {}",
-            std::io::Error::from_raw_os_error(err_code)
-        ));
+        return HookWaitResult::Error(format!("kqueue registration failed: errno {}", err_code));
     }
+
+    unsafe { libc::close(kq) };
 
     if event.filter == libc::EVFILT_PROC {
         match child.wait() {
             Ok(status) => HookWaitResult::Exited(status),
-            Err(e) => HookWaitResult::Error(e.to_string()),
+            Err(e) => HookWaitResult::Error(format!("{:?}", e)),
         }
     } else {
         HookWaitResult::TimedOut
@@ -969,11 +970,11 @@ fn send_signal(pid: i32, signal: Signal, foreground: bool) -> Result<()> {
         if ret == 0 {
             return Ok(());
         }
-        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        if errno == libc::ESRCH {
+        let err = errno();
+        if err == libc::ESRCH {
             return Ok(()); // already dead, that's fine
         }
-        return Err(TimeoutError::SignalError(errno));
+        return Err(TimeoutError::SignalError(err));
     }
 
     /*
@@ -986,31 +987,26 @@ fn send_signal(pid: i32, signal: Signal, foreground: bool) -> Result<()> {
         return Ok(());
     }
 
-    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-    if errno == libc::ESRCH {
+    let err = errno();
+    if err == libc::ESRCH {
         /* group gone, try process directly */
         let ret = unsafe { libc::kill(pid, sig) };
         if ret == 0 {
             return Ok(());
         }
-        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-        if errno == libc::ESRCH {
+        let err = errno();
+        if err == libc::ESRCH {
             return Ok(()); // already dead
         }
-        return Err(TimeoutError::SignalError(errno));
+        return Err(TimeoutError::SignalError(err));
     }
 
-    Err(TimeoutError::SignalError(errno))
+    Err(TimeoutError::SignalError(err))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_run_result_exit_code_completed() {
-        /* actual process tests are in integration tests */
-    }
 
     #[test]
     fn test_run_result_exit_code_timeout() {

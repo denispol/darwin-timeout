@@ -8,7 +8,9 @@
  * the ~6KB f64::from_str machinery from libstd.
  */
 
-use std::time::Duration;
+use alloc::format;
+use alloc::string::ToString;
+use core::time::Duration;
 
 use crate::error::{Result, TimeoutError};
 
@@ -111,7 +113,7 @@ fn parse_decimal_to_nanos(s: &str) -> Result<u128> {
             frac_buf[i] = b;
         }
         /* SAFETY: frac_buf contains only ASCII digits */
-        let frac_str = unsafe { std::str::from_utf8_unchecked(&frac_buf) };
+        let frac_str = unsafe { core::str::from_utf8_unchecked(&frac_buf) };
         frac_str
             .parse()
             .map_err(|_| TimeoutError::InvalidDuration(format!("invalid number '{s}'")))?

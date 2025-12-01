@@ -14,7 +14,47 @@
  * - --option=value syntax (borrows from slice, but may need owned for env)
  */
 
-use std::env;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::ffi::{CStr, c_char, c_int};
+
+/* Darwin-specific APIs to get argc/argv and environment */
+unsafe extern "C" {
+    fn _NSGetArgc() -> *const c_int;
+    fn _NSGetArgv() -> *const *const *const c_char;
+    fn getenv(name: *const c_char) -> *const c_char;
+}
+
+/* Helper to read environment variable */
+pub fn get_env(name: &[u8]) -> Option<String> {
+    // SAFETY: name must be null-terminated, getenv is safe with valid C string
+    unsafe {
+        let ptr = getenv(name.as_ptr() as *const c_char);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+        }
+    }
+}
+
+/* Get arguments from Darwin's _NSGetArgc/_NSGetArgv */
+fn get_args_from_darwin() -> Vec<String> {
+    // SAFETY: _NSGetArgc/_NSGetArgv always return valid pointers on macOS
+    unsafe {
+        let argc = *_NSGetArgc();
+        let argv = *_NSGetArgv();
+        let mut args = Vec::with_capacity(argc as usize);
+        for i in 0..argc as isize {
+            let arg_ptr = *argv.offset(i);
+            if !arg_ptr.is_null() {
+                args.push(CStr::from_ptr(arg_ptr).to_string_lossy().into_owned());
+            }
+        }
+        args
+    }
+}
 
 /// Parsed argument - either borrowed from argv or owned (env var / embedded value)
 #[derive(Debug, Clone)]
@@ -115,28 +155,28 @@ pub struct ParseError {
     pub message: String,
 }
 
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.message)
     }
 }
 
-/// parse from std::env::args(), applying env var fallbacks
-/// returns OwnedArgs since env::args() doesn't live long enough for borrowing
+/// parse from Darwin's argc/argv, applying env var fallbacks
+/// returns OwnedArgs since we convert from C strings
 pub fn parse_args() -> Result<OwnedArgs, ParseError> {
-    let args: Vec<String> = env::args().collect();
+    let args = get_args_from_darwin();
     let parsed = parse_from_slice(&args[1..])?;
     let mut owned = parsed.into_owned();
 
     /* apply env var fallbacks: CLI > env > default */
     if owned.signal.is_empty() {
-        owned.signal = env::var("TIMEOUT_SIGNAL").unwrap_or_else(|_| "TERM".to_string());
+        owned.signal = get_env(b"TIMEOUT_SIGNAL\0").unwrap_or_else(|| "TERM".to_string());
     }
     if owned.kill_after.is_none() {
-        owned.kill_after = env::var("TIMEOUT_KILL_AFTER").ok();
+        owned.kill_after = get_env(b"TIMEOUT_KILL_AFTER\0");
     }
     if owned.duration.is_none() {
-        owned.duration = env::var("TIMEOUT").ok();
+        owned.duration = get_env(b"TIMEOUT\0");
     }
 
     Ok(owned)
@@ -173,11 +213,13 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
             }
             "--help" | "-h" => {
                 print_help();
-                std::process::exit(0);
+                // SAFETY: exit is always safe
+                unsafe { libc::exit(0) };
             }
             "--version" | "-V" => {
-                println!("timeout {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
+                print_version();
+                // SAFETY: exit is always safe
+                unsafe { libc::exit(0) };
             }
             "--json" => result.json = true,
             "-p" | "--preserve-status" => result.preserve_status = true,
@@ -290,11 +332,13 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                         match bytes[j] {
                             b'h' => {
                                 print_help();
-                                std::process::exit(0);
+                                // SAFETY: exit is always safe
+                                unsafe { libc::exit(0) };
                             }
                             b'V' => {
-                                println!("timeout {}", env!("CARGO_PKG_VERSION"));
-                                std::process::exit(0);
+                                print_version();
+                                // SAFETY: exit is always safe
+                                unsafe { libc::exit(0) };
                             }
                             b'p' => result.preserve_status = true,
                             b'f' => result.foreground = true,
@@ -390,8 +434,14 @@ where
     Ok(owned)
 }
 
+fn print_version() {
+    crate::io::print_str("timeout ");
+    crate::io::print_str(env!("CARGO_PKG_VERSION"));
+    crate::io::print_str("\n");
+}
+
 fn print_help() {
-    println!(
+    crate::io::print_str(
         r#"Usage: timeout [OPTIONS] DURATION COMMAND [ARG]...
 
 Run a command with a time limit.
@@ -426,7 +476,8 @@ Exit status:
 Environment:
   TIMEOUT         Default duration if not specified on command line
   TIMEOUT_SIGNAL  Default signal (overridden by -s)
-  TIMEOUT_KILL_AFTER  Default kill-after duration (overridden by -k)"#
+  TIMEOUT_KILL_AFTER  Default kill-after duration (overridden by -k)
+"#,
     );
 }
 

@@ -3,7 +3,12 @@
  *
  * Exists mostly for testing. Integration tests need our types, doc tests
  * need a lib. You could use this as a library but honestly just shell out.
+ *
+ * no_std in release builds for minimal binary size. Tests and debug builds
+ * use std for better error messages and easier debugging.
  */
+
+#![cfg_attr(not(any(debug_assertions, test, doc)), no_std)]
 
 //! # darwin-timeout
 //!
@@ -13,7 +18,7 @@
 //!
 //! ```rust
 //! use darwin_timeout::{parse_duration, parse_signal, signal::Signal};
-//! use std::time::Duration;
+//! use core::time::Duration;
 //!
 //! // Parse duration strings
 //! let dur = parse_duration("30s").unwrap();
@@ -23,6 +28,15 @@
 //! let sig = parse_signal("TERM").unwrap();
 //! assert_eq!(sig, Signal::SIGTERM);
 //! ```
+
+extern crate alloc;
+
+/* no_std support modules - custom allocator, panic handler, I/O primitives */
+mod allocator;
+pub mod io;
+mod panic;
+pub mod process;
+pub mod sync;
 
 pub mod args;
 pub mod duration;

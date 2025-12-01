@@ -11,6 +11,7 @@
  */
 
 use crate::error::{Result, TimeoutError};
+use alloc::format;
 
 /* POSIX signals as i32 values from libc. Copy/PartialEq for easy comparison. */
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

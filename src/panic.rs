@@ -5,11 +5,12 @@
  * With panic=abort in Cargo.toml, panics go straight to abort().
  * This handler exists to satisfy the compiler.
  *
- * Only used by the binary. Tests use std's panic handler.
+ * Only used in release builds without tests. Debug builds and tests use std's
+ * panic handler for better error messages.
  */
 
+#[cfg(not(any(debug_assertions, test, doc)))]
 use core::panic::PanicInfo;
-
 /// Panic handler - just abort immediately.
 ///
 /// With panic=abort, the compiler generates code that calls abort()
@@ -25,7 +26,7 @@ use core::panic::PanicInfo;
 ///
 /// In release builds, panics indicate programming errors (violated invariants).
 /// For user-facing errors, we use Result types and proper error handling.
-#[cfg(not(test))]
+#[cfg(not(any(debug_assertions, test, doc)))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     // SAFETY: libc::abort() terminates the process immediately.
@@ -45,6 +46,6 @@ fn panic(_info: &PanicInfo) -> ! {
 /// This function is never actually called when panic=abort is set.
 /// It exists solely to satisfy the linker. The empty body is safe
 /// because the unwinding machinery is completely disabled.
-#[cfg(not(test))]
+#[cfg(not(any(debug_assertions, test, doc)))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_eh_personality() {}

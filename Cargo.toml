@@ -12,7 +12,8 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 # Direct libc for signal handling, process groups, kqueue
-libc = "0.2.177"
+# default-features = false for no_std compatibility
+libc = { version = "0.2.177", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2.0.17"

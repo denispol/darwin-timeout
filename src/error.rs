@@ -7,8 +7,8 @@
  * Don't change them. You'll break CI pipelines.
  */
 
-use std::fmt;
-use std::process::ExitCode;
+use alloc::string::String;
+use core::fmt;
 
 /// exit codes per GNU coreutils convention. don't change these.
 pub mod exit_codes {
@@ -31,7 +31,7 @@ pub enum TimeoutError {
     InvalidSignal(String),
     CommandNotFound(String),
     PermissionDenied(String),
-    SpawnError(std::io::Error),
+    SpawnError(i32),  // errno from spawn
     SignalError(i32), // errno from libc signal calls
     ProcessGroupError(String),
     Internal(String),
@@ -46,42 +46,21 @@ impl fmt::Display for TimeoutError {
             Self::InvalidSignal(s) => write!(f, "invalid signal: {s}"),
             Self::CommandNotFound(s) => write!(f, "command not found: {s}"),
             Self::PermissionDenied(s) => write!(f, "permission denied: {s}"),
-            Self::SpawnError(e) => write!(f, "failed to spawn process: {e}"),
-            Self::SignalError(errno) => {
-                write!(
-                    f,
-                    "signal error: {}",
-                    std::io::Error::from_raw_os_error(*errno)
-                )
-            }
+            Self::SpawnError(errno) => write!(f, "failed to spawn process: errno {errno}"),
+            Self::SignalError(errno) => write!(f, "signal error: errno {errno}"),
             Self::ProcessGroupError(s) => write!(f, "process group error: {s}"),
             Self::Internal(s) => write!(f, "internal error: {s}"),
         }
     }
 }
 
-impl std::error::Error for TimeoutError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::SpawnError(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for TimeoutError {
-    fn from(e: std::io::Error) -> Self {
-        Self::SpawnError(e)
-    }
-}
-
 impl TimeoutError {
     /* map errors to exit codes. 126 vs 127 matters to scripts. */
     #[must_use]
-    pub fn exit_code(&self) -> ExitCode {
+    pub fn exit_code(&self) -> u8 {
         match self {
-            Self::CommandNotFound(_) => ExitCode::from(exit_codes::NOT_FOUND),
-            Self::PermissionDenied(_) => ExitCode::from(exit_codes::CANNOT_INVOKE),
+            Self::CommandNotFound(_) => exit_codes::NOT_FOUND,
+            Self::PermissionDenied(_) => exit_codes::CANNOT_INVOKE,
             Self::InvalidDuration(_)
             | Self::NegativeDuration
             | Self::DurationOverflow
@@ -89,9 +68,9 @@ impl TimeoutError {
             | Self::SpawnError(_)
             | Self::SignalError(_)
             | Self::ProcessGroupError(_)
-            | Self::Internal(_) => ExitCode::from(exit_codes::INTERNAL_ERROR),
+            | Self::Internal(_) => exit_codes::INTERNAL_ERROR,
         }
     }
 }
 
-pub type Result<T> = std::result::Result<T, TimeoutError>;
+pub type Result<T> = core::result::Result<T, TimeoutError>;
