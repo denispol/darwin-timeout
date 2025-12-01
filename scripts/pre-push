@@ -1,0 +1,22 @@
+#!/bin/bash
+#
+# pre-push hook for darwin-timeout
+#
+# runs full validation before push: fmt + clippy + quick tests.
+# slower than pre-commit, but catches more issues before CI.
+#
+# install: cp scripts/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+# or: ./scripts/setup-hooks.sh
+
+set -e
+
+echo "=== pre-push: checking formatting ==="
+cargo fmt --check
+
+echo "=== pre-push: running clippy ==="
+cargo clippy --all-targets -- -D warnings
+
+echo "=== pre-push: running unit tests ==="
+cargo test --lib --quiet
+
+echo "=== pre-push: all checks passed ==="

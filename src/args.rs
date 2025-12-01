@@ -107,12 +107,6 @@ impl<'a> Args<'a> {
             args: self.args.into_iter().map(|v| v.into_owned()).collect(),
         }
     }
-
-    /// generate shell completions to stdout
-    pub fn print_completions(shell: Shell) {
-        let mut cmd = Self::command();
-        clap_complete::generate(shell, &mut cmd, "timeout", &mut io::stdout());
-    }
 }
 
 /// parsing error with context

@@ -77,12 +77,6 @@ fn main() -> ExitCode {
         }
     };
 
-    /* handle --completions early and exit */
-    if let Some(shell) = args.completions {
-        Args::print_completions(shell);
-        return ExitCode::SUCCESS;
-    }
-
     let timeout_env = std::env::var("TIMEOUT").ok();
     let (duration_str, command, extra_args) = resolve_args(&args, timeout_env.as_deref());
 
@@ -176,9 +170,9 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
             let status_code = status.and_then(|s| s.code()).unwrap_or(-1);
 
             /* Build hook fields if hook was run */
-            let hook_json =
-                hook.as_ref()
-                    .map(|h| (h.ran, h.exit_code, h.timed_out, h.elapsed_ms));
+            let hook_json = hook
+                .as_ref()
+                .map(|h| (h.ran, h.exit_code, h.timed_out, h.elapsed_ms));
 
             let _ = write!(
                 out,
