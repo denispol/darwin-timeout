@@ -1610,3 +1610,65 @@ fn test_signal_forwarding_reports_correct_signal() {
         stderr
     );
 }
+
+/* =========================================================================
+ * SHELL COMPLETIONS - Generate scripts for various shells
+ * ========================================================================= */
+
+#[test]
+fn test_completions_bash() {
+    timeout_cmd()
+        .args(["--completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("_timeout()"))
+        .stdout(predicate::str::contains("complete"));
+}
+
+#[test]
+fn test_completions_zsh() {
+    timeout_cmd()
+        .args(["--completions", "zsh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("#compdef timeout"))
+        .stdout(predicate::str::contains("_arguments"));
+}
+
+#[test]
+fn test_completions_fish() {
+    timeout_cmd()
+        .args(["--completions", "fish"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("complete -c timeout"));
+}
+
+#[test]
+fn test_completions_powershell() {
+    timeout_cmd()
+        .args(["--completions", "powershell"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Register-ArgumentCompleter"));
+}
+
+#[test]
+fn test_completions_elvish() {
+    timeout_cmd()
+        .args(["--completions", "elvish"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "set edit:completion:arg-completer[timeout]",
+        ));
+}
+
+#[test]
+fn test_completions_invalid_shell() {
+    timeout_cmd()
+        .args(["--completions", "invalid"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid"));
+}

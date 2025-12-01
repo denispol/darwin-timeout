@@ -10,7 +10,10 @@
  * doesn't try to parse grep's flags.
  */
 
+use clap::CommandFactory;
 use clap::Parser;
+use clap_complete::Shell;
+use std::io;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -44,6 +47,13 @@ pub struct Args {
     /// Prints a JSON object with status, signal, elapsed_ms, and exit_code.
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Generate shell completions and exit.
+    ///
+    /// Outputs completion script for the specified shell to stdout.
+    /// Supported: bash, zsh, fish, powershell, elvish.
+    #[arg(long = "completions", value_name = "SHELL")]
+    pub completions: Option<Shell>,
 
     /// Specify the signal to be sent on timeout.
     ///
@@ -146,6 +156,12 @@ impl Args {
     #[must_use]
     pub fn parse_args() -> Self {
         Self::parse()
+    }
+
+    /// generate shell completions to stdout
+    pub fn print_completions(shell: Shell) {
+        let mut cmd = Self::command();
+        clap_complete::generate(shell, &mut cmd, "timeout", &mut io::stdout());
     }
 }
 
