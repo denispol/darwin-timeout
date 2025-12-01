@@ -1,0 +1,18 @@
+#!/bin/sh
+#
+# pre-commit hook: fast local checks only.
+# full test suite runs on CI across both architectures.
+#
+# install: git config core.hooksPath .githooks
+#
+# to run full tests locally: cargo test --release
+
+set -e
+
+echo "==> cargo fmt --check"
+cargo fmt --check
+
+echo "==> cargo clippy"
+cargo clippy --all-targets -- -D warnings
+
+echo "==> pre-commit passed (full tests run on CI)"
