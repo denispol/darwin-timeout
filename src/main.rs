@@ -70,6 +70,12 @@ fn resolve_args(
 fn main() -> ExitCode {
     let args = Args::parse_args();
 
+    /* handle --completions early and exit */
+    if let Some(shell) = args.completions {
+        Args::print_completions(shell);
+        return ExitCode::SUCCESS;
+    }
+
     let timeout_env = std::env::var("TIMEOUT").ok();
     let (duration_str, command, extra_args) = resolve_args(&args, timeout_env.as_deref());
 

@@ -79,6 +79,12 @@ For distribution or shared `/usr/local/bin` across machines:
 
 Requires both targets: `rustup target add aarch64-apple-darwin x86_64-apple-darwin`
 
+**Shell completions:**
+
+    timeout --completions zsh  > ~/.zsh/completions/_timeout   # zsh
+    timeout --completions bash >> ~/.bashrc                    # bash
+    timeout --completions fish > ~/.config/fish/completions/timeout.fish
+
 Quick Start
 -----------
 
