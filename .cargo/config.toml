@@ -1,0 +1,12 @@
+# macos-specific linker optimizations for smaller binaries
+# -dead_strip removes unused code, -Wl,-exported_symbol,_main exports only main
+
+[target.x86_64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-dead_strip",
+]
+
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-dead_strip",
+]
