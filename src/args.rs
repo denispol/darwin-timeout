@@ -513,7 +513,9 @@ where
 fn print_version() {
     crate::io::print_str("timeout ");
     crate::io::print_str(env!("CARGO_PKG_VERSION"));
-    crate::io::print_str("\n");
+    crate::io::print_str(
+        "\nCopyright (c) 2025 Alexandre Bouveur\nLicense: MIT <https://opensource.org/licenses/MIT>\n",
+    );
 }
 
 fn print_help() {
