@@ -197,11 +197,14 @@ fn run_main() -> u8 {
 
         if args.verbose && !args.quiet {
             match wait_timeout {
-                Some(d) => eprintln!(
-                    "timeout: waiting for file '{}' (timeout: {:.1}s)",
-                    path,
-                    d.as_secs_f64()
-                ),
+                Some(d) => {
+                    let secs = d.as_secs();
+                    let tenths = d.subsec_millis() / 100;
+                    eprintln!(
+                        "timeout: waiting for file '{}' (timeout: {}.{}s)",
+                        path, secs, tenths
+                    );
+                }
                 None => eprintln!("timeout: waiting for file '{}' (no timeout)", path),
             }
         }

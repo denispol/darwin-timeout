@@ -217,6 +217,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri doesn't support mach_continuous_time
     fn test_wait_for_file_timeout() {
         // Should timeout waiting for nonexistent file
         let start = std::time::Instant::now();
@@ -235,6 +236,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Miri doesn't support mach_continuous_time
     fn test_wait_for_file_created_during_wait() {
         let test_file = "/tmp/darwin_timeout_test_wait_file";
 

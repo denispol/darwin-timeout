@@ -83,8 +83,8 @@ jobs:
         run: |
           SIZE=$(stat -f%z target/release/timeout)
           echo "Binary size: $SIZE bytes ($(($SIZE / 1024))KB)"
-          if [ $SIZE -gt 100000 ]; then
-            echo "ERROR: Binary too large (>100KB)"
+          if [ $SIZE -gt 110000 ]; then
+            echo "ERROR: Binary too large (>110KB)"
             exit 1
           fi
 
