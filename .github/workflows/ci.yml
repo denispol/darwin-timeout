@@ -3,25 +3,38 @@
 # Fast feedback on every push/PR: lint first (fast fail), then test on both
 # macOS architectures in parallel. No universal binary build - that's only
 # needed for releases.
+#
+# Optimizations:
+# - Lint runs on ubuntu (10x cheaper than macOS, faster queue)
+# - Skips CI for docs-only changes (README, LICENSE, completions)
+# - Miri runs on ubuntu (doesn't need macOS for UB detection)
 
 name: CI
 
 on:
   push:
     branches: [main, dev]
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
+      - 'completions/**'
     tags-ignore:
       - 'v*'
   pull_request:
-    # run on all PRs, not just main
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
+      - 'completions/**'
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   # Lint first - fast fail before expensive test matrix
+  # Runs on ubuntu (10x cheaper, often faster) since fmt/clippy don't need macOS
   lint:
     name: Lint
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -104,10 +117,12 @@ jobs:
   # Tests using libc FFI (process spawning, I/O, signal delivery) are gated
   # with #[cfg(not(miri))] since Miri cannot interpret macOS syscalls like
   # posix_spawn*, kill, or write. These are covered by integration tests.
+  #
+  # Runs on ubuntu since Miri tests pure Rust code (no macOS syscalls).
   miri:
     name: Miri (UB detection)
     needs: lint
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
