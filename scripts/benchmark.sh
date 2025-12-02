@@ -67,11 +67,11 @@ echo ""
 # ============================================================================
 
 if [[ -n "$GNU_TIMEOUT" ]]; then
-    hyperfine --warmup 5 -N \
-        "$TIMEOUT_BIN 1 true" \
-        "$GNU_TIMEOUT 1 true"
+    hyperfine --warmup 10 -N --runs 30 \
+        -n "darwin-timeout" "$TIMEOUT_BIN 1 true" \
+        -n "GNU timeout" "$GNU_TIMEOUT 1 true"
 else
-    hyperfine --warmup 5 -N "$TIMEOUT_BIN 1 true"
+    hyperfine --warmup 10 -N --runs 30 "$TIMEOUT_BIN 1 true"
 fi
 echo ""
 
@@ -83,31 +83,21 @@ echo ""
 
 echo -e "${CYAN}100ms timeout:${NC}"
 if [[ -n "$GNU_TIMEOUT" ]]; then
-    hyperfine --warmup 3 -N -i \
-        "$TIMEOUT_BIN 0.1 sleep 10" \
-        "$GNU_TIMEOUT 0.1 sleep 10"
+    hyperfine --warmup 5 -N -i --runs 15 \
+        -n "darwin-timeout" "$TIMEOUT_BIN 0.1 sleep 10" \
+        -n "GNU timeout" "$GNU_TIMEOUT 0.1 sleep 10"
 else
-    hyperfine --warmup 3 -N -i "$TIMEOUT_BIN 0.1 sleep 10"
-fi
-echo ""
-
-echo -e "${CYAN}500ms timeout:${NC}"
-if [[ -n "$GNU_TIMEOUT" ]]; then
-    hyperfine --warmup 3 -N -i \
-        "$TIMEOUT_BIN 0.5 sleep 10" \
-        "$GNU_TIMEOUT 0.5 sleep 10"
-else
-    hyperfine --warmup 3 -N -i "$TIMEOUT_BIN 0.5 sleep 10"
+    hyperfine --warmup 5 -N -i --runs 15 "$TIMEOUT_BIN 0.1 sleep 10"
 fi
 echo ""
 
 echo -e "${CYAN}1s timeout:${NC}"
 if [[ -n "$GNU_TIMEOUT" ]]; then
-    hyperfine --warmup 3 -N -i \
-        "$TIMEOUT_BIN 1 sleep 10" \
-        "$GNU_TIMEOUT 1 sleep 10"
+    hyperfine --warmup 3 -N -i --runs 10 \
+        -n "darwin-timeout" "$TIMEOUT_BIN 1 sleep 10" \
+        -n "GNU timeout" "$GNU_TIMEOUT 1 sleep 10"
 else
-    hyperfine --warmup 3 -N -i "$TIMEOUT_BIN 1 sleep 10"
+    hyperfine --warmup 3 -N -i --runs 10 "$TIMEOUT_BIN 1 sleep 10"
 fi
 echo ""
 
@@ -118,9 +108,9 @@ echo ""
 # ============================================================================
 
 echo -e "${CYAN}Baseline vs with timeout:${NC}"
-hyperfine --warmup 5 -N \
-    "echo hello" \
-    "$TIMEOUT_BIN 60 echo hello"
+hyperfine --warmup 10 -N --runs 30 \
+    -n "echo (baseline)" "echo hello" \
+    -n "timeout + echo" "$TIMEOUT_BIN 60 echo hello"
 echo ""
 
 # ============================================================================
@@ -130,7 +120,7 @@ echo ""
 # ============================================================================
 
 echo "Testing: 200ms timeout + 200ms kill-after (target: ~400ms)"
-hyperfine --warmup 2 -N -i --runs 5 \
+hyperfine --warmup 2 -N -i --runs 10 \
     "$TIMEOUT_BIN -k 0.2 0.2 bash -c 'trap \"\" TERM; sleep 60'"
 echo ""
 
@@ -145,6 +135,28 @@ echo "Running 2s timeout, measuring CPU..."
 echo ""
 echo -e "${GREEN}✓ kqueue-based waiting (zero CPU during wait)${NC}"
 echo ""
+
+# ============================================================================
+echo -e "${YELLOW}6. Confine Mode Comparison${NC}"
+echo "   Wall clock (-c wall) vs Active time (-c active)"
+echo "   Both modes have identical performance; difference is sleep behavior."
+echo ""
+# ============================================================================
+
+if [[ -n "$GNU_TIMEOUT" ]]; then
+    echo -e "${CYAN}All three implementations (startup):${NC}"
+    hyperfine --warmup 10 -N --runs 30 \
+        -n "darwin-timeout (wall, default)" "$TIMEOUT_BIN 1 true" \
+        -n "darwin-timeout (active)" "$TIMEOUT_BIN -c active 1 true" \
+        -n "GNU timeout" "$GNU_TIMEOUT 1 true"
+    echo ""
+else
+    echo -e "${CYAN}Confine modes (no GNU timeout for reference):${NC}"
+    hyperfine --warmup 10 -N --runs 30 \
+        -n "wall (default)" "$TIMEOUT_BIN 1 true" \
+        -n "active" "$TIMEOUT_BIN -c active 1 true"
+    echo ""
+fi
 
 # ============================================================================
 echo -e "${BLUE}=== Summary ===${NC}"
