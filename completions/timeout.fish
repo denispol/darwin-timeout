@@ -19,9 +19,12 @@ complete -c timeout -s p -l preserve-status -d 'Exit with command status on time
 complete -c timeout -s f -l foreground -d 'Run in foreground (allow TTY access)'
 complete -c timeout -s v -l verbose -d 'Diagnose signals to stderr'
 complete -c timeout -s q -l quiet -d 'Suppress diagnostic output'
+complete -c timeout -s c -l confine -d 'Time mode (wall or active)' -xa 'wall active'
 complete -c timeout -l timeout-exit-code -d 'Exit code on timeout' -xa '124 125 0 1'
 complete -c timeout -l on-timeout -d 'Command to run before signaling' -xa '(__fish_complete_command)'
 complete -c timeout -l on-timeout-limit -d 'Timeout for hook command' -xa "$durations"
+complete -c timeout -l wait-for-file -d 'Wait for file to exist before starting' -rF
+complete -c timeout -l wait-for-file-timeout -d 'Timeout for wait-for-file' -xa "$durations"
 complete -c timeout -l json -d 'Output JSON for scripting'
 
 # First positional argument: duration

@@ -42,9 +42,12 @@ _timeout() {
         '(-f --foreground)'{-f,--foreground}'[run in foreground (allow TTY access)]' \
         '(-v --verbose -q --quiet)'{-v,--verbose}'[diagnose signals to stderr]' \
         '(-q --quiet -v --verbose)'{-q,--quiet}'[suppress diagnostic output]' \
+        '(-c --confine)'{-c,--confine}'[time mode (wall or active)]:mode:(wall active)' \
         '--timeout-exit-code[exit code on timeout]:code:(124 125 0 1)' \
         '--on-timeout[command to run before signaling]:command:_command_names' \
         '--on-timeout-limit[timeout for hook command]:duration:->duration' \
+        '--wait-for-file[wait for file to exist before starting]:file:_files' \
+        '--wait-for-file-timeout[timeout for wait-for-file]:duration:->duration' \
         '--json[output JSON for scripting]' \
         '1:duration:->duration' \
         '2:command:_command_names' \

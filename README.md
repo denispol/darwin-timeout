@@ -47,6 +47,7 @@ darwin-timeout uses `mach_continuous_time`, the only macOS clock that keeps coun
 | Process group handling    | ✓              | ✓             |
 | JSON output for CI        | ✓              | ✗             |
 | Pre-timeout hook          | ✓              | ✗             |
+| Wait for file readiness   | ✓              | ✗             |
 | Custom exit code          | ✓              | ✗             |
 | Quiet mode                | ✓              | ✗             |
 | Env var configuration     | ✓              | ✗             |
@@ -203,6 +204,11 @@ Environment variable for duration:
 
     TIMEOUT=30s timeout ./my-command
 
+Wait for file before starting:
+
+    timeout --wait-for-file /tmp/ready.txt 5m ./process-data
+    timeout --wait-for-file /tmp/ready --wait-for-file-timeout 30s 5m ./task
+
 Options
 -------
 
@@ -216,6 +222,8 @@ Options
     --timeout-exit-code N    Exit with N instead of 124 on timeout
     --on-timeout CMD         Run CMD on timeout (before kill); %p = child PID
     --on-timeout-limit T     Time limit for --on-timeout (default: 5s)
+    --wait-for-file PATH     Wait for file to exist before starting command
+    --wait-for-file-timeout T  Timeout for --wait-for-file (default: wait forever)
     --json                   JSON output for scripting
 
 ### Time Confinement Modes (-c, --confine)
@@ -238,9 +246,11 @@ timeout -c active 1h ./benchmark
 Environment Variables
 ---------------------
 
-    TIMEOUT            Default duration (used if CLI arg isn't a valid duration)
-    TIMEOUT_SIGNAL     Default signal (overridden by -s/--signal)
-    TIMEOUT_KILL_AFTER Default kill-after (overridden by -k/--kill-after)
+    TIMEOUT                       Default duration (used if CLI arg isn't a valid duration)
+    TIMEOUT_SIGNAL                Default signal (overridden by -s/--signal)
+    TIMEOUT_KILL_AFTER            Default kill-after (overridden by -k/--kill-after)
+    TIMEOUT_WAIT_FOR_FILE         Default file to wait for
+    TIMEOUT_WAIT_FOR_FILE_TIMEOUT Timeout for wait-for-file
 
 Duration Format
 ---------------
