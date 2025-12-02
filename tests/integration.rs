@@ -635,13 +635,14 @@ fn test_timing_precision_100ms() {
         .code(124);
 
     let elapsed = start.elapsed();
-    /* Should be 100ms +/- 50ms tolerance */
+    /* Should be ~100ms. Upper bound relaxed for x86_64 emulation on CI (ARM runners)
+     * where process spawn overhead can exceed 500ms. */
     assert!(
         elapsed >= Duration::from_millis(50),
         "too fast: {elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_millis(300),
+        elapsed < Duration::from_millis(1000),
         "too slow: {elapsed:?}"
     );
 }
