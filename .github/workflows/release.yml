@@ -47,8 +47,10 @@ jobs:
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
 
+      # tests run in debug mode - release builds use no_std with custom panic
+      # handler that conflicts with std's panic handler in test harness
       - name: Test
-        run: cargo test --release
+        run: cargo test
 
       - name: Build for aarch64
         run: cargo build --release --target aarch64-apple-darwin
