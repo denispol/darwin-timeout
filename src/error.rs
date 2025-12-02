@@ -35,6 +35,8 @@ pub enum TimeoutError {
     SignalError(i32), // errno from libc signal calls
     ProcessGroupError(String),
     Internal(String),
+    WaitForFileTimeout(String), // file path that we timed out waiting for
+    WaitForFileError(String, i32), // file path + errno from stat
 }
 
 impl fmt::Display for TimeoutError {
@@ -50,6 +52,10 @@ impl fmt::Display for TimeoutError {
             Self::SignalError(errno) => write!(f, "signal error: errno {errno}"),
             Self::ProcessGroupError(s) => write!(f, "process group error: {s}"),
             Self::Internal(s) => write!(f, "internal error: {s}"),
+            Self::WaitForFileTimeout(path) => write!(f, "timed out waiting for file: {path}"),
+            Self::WaitForFileError(path, errno) => {
+                write!(f, "error checking file '{path}': errno {errno}")
+            }
         }
     }
 }
@@ -68,7 +74,10 @@ impl TimeoutError {
             | Self::SpawnError(_)
             | Self::SignalError(_)
             | Self::ProcessGroupError(_)
-            | Self::Internal(_) => exit_codes::INTERNAL_ERROR,
+            | Self::Internal(_)
+            | Self::WaitForFileError(_, _) => exit_codes::INTERNAL_ERROR,
+            // file-wait timeout uses same code as command timeout (124)
+            Self::WaitForFileTimeout(_) => exit_codes::TIMEOUT,
         }
     }
 }
