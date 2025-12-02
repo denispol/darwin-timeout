@@ -111,6 +111,8 @@ impl<T> AtomicOnce<T> {
             // SAFETY: Same as get() - Acquire load synchronizes with Release store,
             // value is immutable and was written before the Release.
             // unwrap_unchecked is safe because INITIALIZED implies Some.
+            // Deref and unwrap_unchecked share the same invariant (value is valid Some).
+            #[allow(clippy::multiple_unsafe_ops_per_block)]
             return unsafe { (*self.value.get()).as_ref().unwrap_unchecked() };
         }
 
@@ -149,7 +151,11 @@ impl<T> AtomicOnce<T> {
         // SAFETY: At this point, state is INITIALIZED (either we set it, or we
         // spin-waited until another thread set it). Acquire ordering in the spin
         // loop synchronizes with the Release store. Value is immutable and Some.
-        unsafe { (*self.value.get()).as_ref().unwrap_unchecked() }
+        // Deref and unwrap_unchecked share the same invariant (value is valid Some).
+        #[allow(clippy::multiple_unsafe_ops_per_block)]
+        unsafe {
+            (*self.value.get()).as_ref().unwrap_unchecked()
+        }
     }
 }
 
