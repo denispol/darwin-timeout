@@ -244,6 +244,7 @@ pub fn spawn_command(
     argv_ptrs.push(ptr::null());
 
     /* initialize spawn attributes */
+    // SAFETY: zeroed() produces a valid zero-initialized struct for posix_spawnattr_t
     let mut attr: posix_spawnattr_t = unsafe { core::mem::zeroed() };
     // SAFETY: attr is valid zeroed struct
     let ret = unsafe { posix_spawnattr_init(&mut attr) };
@@ -253,7 +254,9 @@ pub fn spawn_command(
 
     /* set process group if requested */
     if use_process_group {
-        // SAFETY: attr was initialized above
+        // SAFETY: attr was initialized above. Both calls configure the same attr,
+        // sharing the invariant that attr is a valid initialized posix_spawnattr_t.
+        #[allow(clippy::multiple_unsafe_ops_per_block)]
         unsafe {
             posix_spawnattr_setflags(&mut attr, POSIX_SPAWN_SETPGROUP);
             posix_spawnattr_setpgroup(&mut attr, 0); /* own group */
@@ -261,6 +264,7 @@ pub fn spawn_command(
     }
 
     /* initialize file actions (inherit stdin/stdout/stderr) */
+    // SAFETY: zeroed() produces a valid zero-initialized struct for posix_spawn_file_actions_t
     let mut file_actions: posix_spawn_file_actions_t = unsafe { core::mem::zeroed() };
     // SAFETY: file_actions is valid zeroed struct
     let ret = unsafe { posix_spawn_file_actions_init(&mut file_actions) };
@@ -288,7 +292,9 @@ pub fn spawn_command(
     };
 
     /* cleanup */
-    // SAFETY: both were initialized above
+    // SAFETY: both were initialized above. Destroy calls share the invariant that
+    // the structs are valid and initialized, and are safe to call in any order.
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
     unsafe {
         posix_spawn_file_actions_destroy(&mut file_actions);
         posix_spawnattr_destroy(&mut attr);
@@ -311,11 +317,25 @@ fn errno() -> i32 {
     unsafe extern "C" {
         fn __error() -> *mut i32;
     }
-    // SAFETY: __error always returns valid pointer on macOS
-    unsafe { *__error() }
+    // SAFETY: __error always returns valid pointer on macOS. The dereference and
+    // function call share the same invariant (pointer validity for thread-local errno).
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
+    unsafe {
+        *__error()
+    }
 }
 
+/*
+ * Tests for process spawning.
+ *
+ * These tests are skipped under Miri because posix_spawn* and waitpid are
+ * unsupported foreign functions. Miri can validate pure-Rust logic but cannot
+ * interpret OS-level process creation syscalls.
+ *
+ * The logic tested here is covered by integration tests which run natively.
+ */
 #[cfg(test)]
+#[cfg(not(miri))]
 mod tests {
     use super::*;
     use alloc::vec;

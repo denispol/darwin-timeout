@@ -2,7 +2,7 @@
 name = "darwin-timeout"
 version = "1.1.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.91"
 authors = ["denispol"]
 description = "Run a command with a time limit (GNU timeout clone for Darwin/Apple platforms)"
 license = "MIT"
@@ -47,3 +47,19 @@ path = "src/main.rs"
 
 [features]
 default = []
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+# New in 1.91: catches raw pointers derived from locals that outlive their source.
+# Critical for FFI code where stack pointers could escape to C functions.
+dangling_pointers_from_locals = "deny"
+# Uplifted in 1.88: prevents null pointer UB in FFI calls expecting non-null args.
+invalid_null_arguments = "deny"
+
+[lints.clippy]
+# Require SAFETY comments on unsafe blocks - enforces documentation of invariants.
+undocumented_unsafe_blocks = "deny"
+# Prefer single unsafe ops per block for auditability. Allow-listed in existing
+# code where multiple operations share the same invariants (e.g., fcntl sequences,
+# sigaction setup). New code should split blocks where possible.
+multiple_unsafe_ops_per_block = "warn"

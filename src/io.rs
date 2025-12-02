@@ -121,7 +121,14 @@ macro_rules! format {
     }};
 }
 
+/*
+ * Tests for I/O primitives.
+ *
+ * Skipped under Miri: libc::write is an unsupported foreign function.
+ * These are smoke tests verifying the syscall wrappers don't crash.
+ */
 #[cfg(test)]
+#[cfg(not(miri))]
 mod tests {
     use super::*;
 

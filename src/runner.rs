@@ -69,6 +69,8 @@ pub fn setup_signal_forwarding() -> Option<RawFd> {
 
     // SAFETY: read_fd and write_fd are valid fds just returned by pipe().
     // fcntl with F_GETFL/F_SETFL/F_SETFD are safe operations on valid fds.
+    // Multiple ops share the same invariant (fd validity).
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
     unsafe {
         let flags = libc::fcntl(read_fd, libc::F_GETFL);
         /* Only set O_NONBLOCK if F_GETFL succeeded (flags >= 0) */
@@ -87,7 +89,9 @@ pub fn setup_signal_forwarding() -> Option<RawFd> {
     /* Try to claim the signal pipe slot first, before setting up handlers */
     if SIGNAL_PIPE.set(read_fd).is_err() {
         /* Already set (re-entry) - close fds to avoid leak */
-        // SAFETY: read_fd and write_fd are valid fds from pipe() above
+        // SAFETY: read_fd and write_fd are valid fds from pipe() above.
+        // Both close calls share the same invariant (fd validity from pipe()).
+        #[allow(clippy::multiple_unsafe_ops_per_block)]
         unsafe {
             libc::close(read_fd);
             libc::close(write_fd);
@@ -103,6 +107,8 @@ pub fn setup_signal_forwarding() -> Option<RawFd> {
     // SAFETY: sigaction struct is zeroed then properly initialized.
     // signal_handler is an extern "C" fn with correct signature.
     // sigemptyset and sigaction are standard POSIX calls with valid args.
+    // All ops share the invariant of setting up signal handlers atomically.
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
     unsafe {
         let mut sa: libc::sigaction = core::mem::zeroed();
         sa.sa_sigaction = signal_handler as *const () as usize;
@@ -148,6 +154,8 @@ pub fn cleanup_signal_forwarding() {
 
     /* Reset signal handlers to default */
     // SAFETY: SIG_DFL is the standard default handler, sigaction is safe with valid args.
+    // All ops share the invariant of resetting signal handlers atomically.
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
     unsafe {
         let mut sa: libc::sigaction = core::mem::zeroed();
         sa.sa_sigaction = libc::SIG_DFL;
@@ -558,8 +566,12 @@ fn errno() -> i32 {
     unsafe extern "C" {
         fn __error() -> *mut i32;
     }
-    // SAFETY: __error always returns valid pointer on macOS
-    unsafe { *__error() }
+    // SAFETY: __error always returns valid pointer on macOS. The dereference and
+    // function call share the same invariant (pointer validity for thread-local errno).
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
+    unsafe {
+        *__error()
+    }
 }
 
 /*
@@ -875,6 +887,7 @@ fn wait_for_hook_with_kqueue(
     let deadline_ns = start_ns.saturating_add(timeout_ns);
 
     /* create kqueue fd */
+    // SAFETY: kqueue() has no preconditions, returns -1 on error (checked below).
     let kq = unsafe { libc::kqueue() };
     if kq < 0 {
         return HookWaitResult::Error(format!("kqueue failed: errno {}", errno()));
@@ -914,12 +927,15 @@ fn wait_for_hook_with_kqueue(
         /* Recalculate remaining time (handles EINTR correctly) */
         let now_ns = precise_now_ns(confine);
         if now_ns >= deadline_ns {
+            // SAFETY: kq is a valid fd from kqueue() above.
             unsafe { libc::close(kq) };
             return HookWaitResult::TimedOut;
         }
         let remaining_ns = deadline_ns.saturating_sub(now_ns);
         changes[1].data = remaining_ns.min(MAX_TIMER_NS) as isize;
 
+        // SAFETY: kq is a valid kqueue fd. changes is a valid slice of kevent structs.
+        // event is a valid buffer for one kevent. Timeout is null (wait forever).
         #[allow(clippy::cast_possible_wrap)]
         let n = unsafe {
             libc::kevent(
@@ -939,6 +955,7 @@ fn wait_for_hook_with_kqueue(
             }
             if err == libc::ESRCH {
                 /* Process already gone */
+                // SAFETY: kq is a valid fd from kqueue() above.
                 unsafe { libc::close(kq) };
                 return match child.try_wait() {
                     Ok(Some(status)) => HookWaitResult::Exited(status),
@@ -949,6 +966,7 @@ fn wait_for_hook_with_kqueue(
                     Err(e) => HookWaitResult::Error(format!("{:?}", e)),
                 };
             }
+            // SAFETY: kq is a valid fd from kqueue() above.
             unsafe { libc::close(kq) };
             return HookWaitResult::Error(format!("kevent failed: errno {}", err));
         }
@@ -959,6 +977,7 @@ fn wait_for_hook_with_kqueue(
     if (event.flags & libc::EV_ERROR) != 0 {
         #[allow(clippy::cast_possible_truncation)]
         let err_code = event.data as i32;
+        // SAFETY: kq is a valid fd from kqueue() above.
         unsafe { libc::close(kq) };
         if err_code == libc::ESRCH {
             return match child.wait() {
@@ -969,6 +988,7 @@ fn wait_for_hook_with_kqueue(
         return HookWaitResult::Error(format!("kqueue registration failed: errno {}", err_code));
     }
 
+    // SAFETY: kq is a valid fd from kqueue() above.
     unsafe { libc::close(kq) };
 
     if event.filter == libc::EVFILT_PROC {
@@ -1022,6 +1042,7 @@ fn send_signal(pid: i32, signal: Signal, foreground: bool) -> Result<()> {
     let err = errno();
     if err == libc::ESRCH {
         /* group gone, try process directly */
+        // SAFETY: kill() is safe with any pid/signal combo, returns -1 on error
         let ret = unsafe { libc::kill(pid, sig) };
         if ret == 0 {
             return Ok(());
@@ -1079,7 +1100,9 @@ mod tests {
         assert_eq!(result.exit_code(false, 0), 0);
     }
 
+    /* Skip under Miri: libc::kill is an unsupported foreign function */
     #[test]
+    #[cfg(not(miri))]
     fn test_send_signal_to_nonexistent_process() {
         /* ESRCH should be handled gracefully */
         let fake_pid = 99999i32;
