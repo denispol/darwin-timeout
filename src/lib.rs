@@ -43,6 +43,7 @@ pub mod duration;
 pub mod error;
 pub mod runner;
 pub mod signal;
+pub mod wait;
 
 pub use args::Args;
 pub use duration::{is_no_timeout, parse_duration};
