@@ -133,6 +133,8 @@ pub struct Args<'a> {
     pub on_timeout: Option<ArgValue<'a>>,
     pub on_timeout_limit: ArgValue<'a>,
     pub confine: Confine,
+    pub wait_for_file: Option<ArgValue<'a>>,
+    pub wait_for_file_timeout: Option<ArgValue<'a>>,
     pub duration: Option<ArgValue<'a>>,
     pub command: Option<ArgValue<'a>>,
     pub args: Vec<ArgValue<'a>>,
@@ -152,6 +154,8 @@ pub struct OwnedArgs {
     pub on_timeout: Option<String>,
     pub on_timeout_limit: String,
     pub confine: Confine,
+    pub wait_for_file: Option<String>,
+    pub wait_for_file_timeout: Option<String>,
     pub duration: Option<String>,
     pub command: Option<String>,
     pub args: Vec<String>,
@@ -172,6 +176,8 @@ impl<'a> Args<'a> {
             on_timeout: self.on_timeout.map(|v| v.into_owned()),
             on_timeout_limit: self.on_timeout_limit.into_owned(),
             confine: self.confine,
+            wait_for_file: self.wait_for_file.map(|v| v.into_owned()),
+            wait_for_file_timeout: self.wait_for_file_timeout.map(|v| v.into_owned()),
             duration: self.duration.map(|v| v.into_owned()),
             command: self.command.map(|v| v.into_owned()),
             args: self.args.into_iter().map(|v| v.into_owned()).collect(),
@@ -207,6 +213,12 @@ pub fn parse_args() -> Result<OwnedArgs, ParseError> {
     }
     if owned.duration.is_none() {
         owned.duration = get_env(b"TIMEOUT\0");
+    }
+    if owned.wait_for_file.is_none() {
+        owned.wait_for_file = get_env(b"TIMEOUT_WAIT_FOR_FILE\0");
+    }
+    if owned.wait_for_file_timeout.is_none() {
+        owned.wait_for_file_timeout = get_env(b"TIMEOUT_WAIT_FOR_FILE_TIMEOUT\0");
     }
 
     Ok(owned)
@@ -358,6 +370,31 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                 result.confine = Confine::from_str(val).ok_or_else(|| ParseError {
                     message: format!("invalid confine mode: '{}' (use 'wall' or 'active')", val),
                 })?;
+            }
+
+            "--wait-for-file" => {
+                i += 1;
+                result.wait_for_file = Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                    ParseError {
+                        message: "--wait-for-file requires a path".to_string(),
+                    }
+                })?));
+            }
+            s if s.starts_with("--wait-for-file=") => {
+                result.wait_for_file = Some(ArgValue::Borrowed(&s[16..]));
+            }
+
+            "--wait-for-file-timeout" => {
+                i += 1;
+                result.wait_for_file_timeout =
+                    Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                        ParseError {
+                            message: "--wait-for-file-timeout requires a duration".to_string(),
+                        }
+                    })?));
+            }
+            s if s.starts_with("--wait-for-file-timeout=") => {
+                result.wait_for_file_timeout = Some(ArgValue::Borrowed(&s[24..]));
             }
 
             /* unknown long option */
@@ -547,12 +584,17 @@ Options:
       --on-timeout-limit <DUR>    Timeout for the --on-timeout hook command [default: 5s]
   -c, --confine <MODE>            Time measurement mode: 'wall' (default, includes sleep) or
                                   'active' (excludes system sleep, faster, for benchmarks)
+      --wait-for-file <PATH>      Wait for file to exist before starting command
+                                  [env: TIMEOUT_WAIT_FOR_FILE]
+      --wait-for-file-timeout <DUR>  Timeout for --wait-for-file (default: wait forever)
+                                  [env: TIMEOUT_WAIT_FOR_FILE_TIMEOUT]
       --json                      Output result as JSON (for scripting/CI)
   -h, --help                      Print help
   -V, --version                   Print version
 
 Exit status:
   124 if COMMAND times out, and --preserve-status is not specified
+  124 if --wait-for-file times out
   125 if the timeout command itself fails
   126 if COMMAND is found but cannot be invoked
   127 if COMMAND cannot be found
@@ -563,6 +605,8 @@ Environment:
   TIMEOUT         Default duration if not specified on command line
   TIMEOUT_SIGNAL  Default signal (overridden by -s)
   TIMEOUT_KILL_AFTER  Default kill-after duration (overridden by -k)
+  TIMEOUT_WAIT_FOR_FILE  Default file to wait for
+  TIMEOUT_WAIT_FOR_FILE_TIMEOUT  Default timeout for wait-for-file
 "#,
     );
 }
@@ -762,5 +806,63 @@ mod tests {
     fn test_confine_short_flag_embedded() {
         let args = try_parse_from(["timeout", "-cwall", "5s", "cmd"]).unwrap();
         assert_eq!(args.confine, Confine::Wall);
+    }
+
+    #[test]
+    fn test_wait_for_file() {
+        let args =
+            try_parse_from(["timeout", "--wait-for-file", "/tmp/ready", "5s", "cmd"]).unwrap();
+        assert_eq!(args.wait_for_file, Some("/tmp/ready".to_string()));
+        assert!(args.wait_for_file_timeout.is_none());
+    }
+
+    #[test]
+    fn test_wait_for_file_equals_syntax() {
+        let args = try_parse_from(["timeout", "--wait-for-file=/tmp/ready", "5s", "cmd"]).unwrap();
+        assert_eq!(args.wait_for_file, Some("/tmp/ready".to_string()));
+    }
+
+    #[test]
+    fn test_wait_for_file_with_timeout() {
+        let args = try_parse_from([
+            "timeout",
+            "--wait-for-file",
+            "/tmp/ready",
+            "--wait-for-file-timeout",
+            "30s",
+            "5s",
+            "cmd",
+        ])
+        .unwrap();
+        assert_eq!(args.wait_for_file, Some("/tmp/ready".to_string()));
+        assert_eq!(args.wait_for_file_timeout, Some("30s".to_string()));
+    }
+
+    #[test]
+    fn test_wait_for_file_timeout_equals_syntax() {
+        let args = try_parse_from([
+            "timeout",
+            "--wait-for-file=/tmp/ready",
+            "--wait-for-file-timeout=1m",
+            "5s",
+            "cmd",
+        ])
+        .unwrap();
+        assert_eq!(args.wait_for_file, Some("/tmp/ready".to_string()));
+        assert_eq!(args.wait_for_file_timeout, Some("1m".to_string()));
+    }
+
+    #[test]
+    fn test_wait_for_file_missing_path() {
+        let result = try_parse_from(["timeout", "--wait-for-file"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("requires a path"));
+    }
+
+    #[test]
+    fn test_wait_for_file_timeout_missing_duration() {
+        let result = try_parse_from(["timeout", "--wait-for-file-timeout"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("requires a duration"));
     }
 }
