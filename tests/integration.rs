@@ -1697,3 +1697,171 @@ fn test_signal_forwarding_reports_correct_signal() {
         stderr
     );
 }
+
+/* =========================================================================
+ * WAIT FOR FILE - Pre-command file waiting feature
+ * ========================================================================= */
+
+#[test]
+fn test_wait_for_file_existing_file() {
+    /*
+     * When file already exists, should proceed immediately.
+     */
+    timeout_cmd()
+        .args(["--wait-for-file", "Cargo.toml", "5s", "echo", "success"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("success"));
+}
+
+#[test]
+fn test_wait_for_file_timeout() {
+    /*
+     * When file doesn't exist and wait times out, exit 124.
+     */
+    let start = Instant::now();
+
+    timeout_cmd()
+        .args([
+            "--wait-for-file",
+            "/tmp/nonexistent_file_for_test_12345",
+            "--wait-for-file-timeout",
+            "0.1s",
+            "5s",
+            "echo",
+            "should not run",
+        ])
+        .assert()
+        .code(124)
+        .stderr(predicate::str::contains("timed out waiting for file"));
+
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(100),
+        "should have waited at least 100ms"
+    );
+    assert!(elapsed < Duration::from_secs(1), "should not wait too long");
+}
+
+#[test]
+fn test_wait_for_file_created_during_wait() {
+    /*
+     * When file is created while waiting, should proceed.
+     */
+    use std::fs;
+    use std::thread;
+
+    let test_file = "/tmp/darwin_timeout_test_wait_file_integration";
+    let _ = fs::remove_file(test_file);
+
+    /* Spawn a thread to create the file after a delay */
+    let path = test_file.to_string();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(50));
+        fs::write(&path, "ready").unwrap();
+    });
+
+    let start = Instant::now();
+
+    timeout_cmd()
+        .args([
+            "--wait-for-file",
+            test_file,
+            "--wait-for-file-timeout",
+            "5s",
+            "30s",
+            "echo",
+            "file found",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("file found"));
+
+    let elapsed = start.elapsed();
+    assert!(elapsed < Duration::from_secs(2), "should find file quickly");
+
+    /* Clean up */
+    let _ = fs::remove_file(test_file);
+}
+
+#[test]
+fn test_wait_for_file_verbose() {
+    /*
+     * Verbose mode should show waiting status.
+     */
+    timeout_cmd()
+        .args(["-v", "--wait-for-file", "Cargo.toml", "5s", "echo", "done"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("waiting for file"))
+        .stderr(predicate::str::contains("found"));
+}
+
+#[test]
+fn test_wait_for_file_quiet() {
+    /*
+     * Quiet mode should suppress error messages.
+     */
+    timeout_cmd()
+        .args([
+            "-q",
+            "--wait-for-file",
+            "/tmp/nonexistent_12345",
+            "--wait-for-file-timeout",
+            "0.1s",
+            "5s",
+            "echo",
+            "nope",
+        ])
+        .assert()
+        .code(124)
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn test_wait_for_file_json_timeout() {
+    /*
+     * JSON output should include wait-for-file timeout info.
+     */
+    timeout_cmd()
+        .args([
+            "--json",
+            "--wait-for-file",
+            "/tmp/nonexistent_12345",
+            "--wait-for-file-timeout",
+            "0.1s",
+            "5s",
+            "echo",
+            "nope",
+        ])
+        .assert()
+        .code(124)
+        .stdout(predicate::str::contains("\"status\":\"error\""))
+        .stdout(predicate::str::contains("\"exit_code\":124"));
+}
+
+#[test]
+fn test_wait_for_file_with_env_var() {
+    /*
+     * Environment variable should work for wait-for-file.
+     */
+    timeout_cmd()
+        .env("TIMEOUT_WAIT_FOR_FILE", "Cargo.toml")
+        .args(["5s", "echo", "env var works"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("env var works"));
+}
+
+#[test]
+fn test_wait_for_file_cli_overrides_env() {
+    /*
+     * CLI should override environment variable.
+     */
+    timeout_cmd()
+        .env("TIMEOUT_WAIT_FOR_FILE", "/tmp/nonexistent_12345")
+        .args(["--wait-for-file", "Cargo.toml", "5s", "echo", "cli wins"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cli wins"));
+}
