@@ -28,7 +28,10 @@ unsafe extern "C" {
 
 /* Helper to read environment variable */
 pub fn get_env(name: &[u8]) -> Option<String> {
-    // SAFETY: name must be null-terminated, getenv is safe with valid C string
+    // SAFETY: name must be null-terminated (caller ensures this), getenv returns
+    // a valid C string pointer or null. CStr::from_ptr is safe with non-null result.
+    // Multiple unsafe ops allowed: getenv + CStr::from_ptr share same validity invariant.
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
     unsafe {
         let ptr = getenv(name.as_ptr() as *const c_char);
         if ptr.is_null() {
@@ -41,7 +44,10 @@ pub fn get_env(name: &[u8]) -> Option<String> {
 
 /* Get arguments from Darwin's _NSGetArgc/_NSGetArgv */
 fn get_args_from_darwin() -> Vec<String> {
-    // SAFETY: _NSGetArgc/_NSGetArgv always return valid pointers on macOS
+    // SAFETY: _NSGetArgc/_NSGetArgv always return valid pointers on macOS.
+    // argc is the valid count, argv[0..argc] are valid null-terminated C strings.
+    // Multiple unsafe ops allowed: all share the same invariant (valid argv array).
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
     unsafe {
         let argc = *_NSGetArgc();
         let argv = *_NSGetArgv();

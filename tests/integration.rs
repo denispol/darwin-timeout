@@ -1005,6 +1005,7 @@ fn test_signal_forwarding_sigterm() {
     let start = Instant::now();
 
     /* Send SIGTERM to the timeout process */
+    // SAFETY: kill() is safe with any valid pid/signal combo
     unsafe {
         libc::kill(timeout_process.id() as i32, libc::SIGTERM);
     }
@@ -1052,6 +1053,7 @@ fn test_signal_forwarding_sigint() {
 
     let start = Instant::now();
 
+    // SAFETY: kill() is safe with any valid pid/signal combo
     unsafe {
         libc::kill(timeout_process.id() as i32, libc::SIGINT);
     }
@@ -1576,6 +1578,89 @@ fn test_on_timeout_limit_warning() {
         .stderr(predicate::str::contains("exceeds"));
 }
 
+/* =========================================================================
+ * CONFINE MODE - Time measurement behavior
+ * ========================================================================= */
+
+#[test]
+fn test_confine_wall_mode_accepted() {
+    /*
+     * -c wall should be accepted and use wall-clock timing (default behavior).
+     * Uses mach_continuous_time which counts through system sleep.
+     */
+    timeout_cmd()
+        .args(["-c", "wall", "5s", "echo", "hello"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello"));
+}
+
+#[test]
+fn test_confine_active_mode_accepted() {
+    /*
+     * -c active should be accepted and use active-time-only timing.
+     * Uses CLOCK_MONOTONIC_RAW which pauses during system sleep.
+     * ~28% faster internally due to no timebase conversion.
+     */
+    timeout_cmd()
+        .args(["-c", "active", "5s", "echo", "hello"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello"));
+}
+
+#[test]
+fn test_confine_long_form_accepted() {
+    /*
+     * --confine=wall and --confine=active should work
+     */
+    timeout_cmd()
+        .args(["--confine=wall", "5s", "echo", "hello"])
+        .assert()
+        .success();
+
+    timeout_cmd()
+        .args(["--confine=active", "5s", "echo", "hello"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_confine_invalid_mode_rejected() {
+    /*
+     * Invalid confine mode should produce an error
+     */
+    timeout_cmd()
+        .args(["-c", "invalid", "5s", "echo", "hello"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("confine"));
+}
+
+#[test]
+fn test_confine_active_timeout_works() {
+    /*
+     * Active mode should still properly timeout commands.
+     * This verifies the CLOCK_MONOTONIC_RAW timing path.
+     */
+    let start = std::time::Instant::now();
+
+    timeout_cmd()
+        .args(["-c", "active", "0.5s", "sleep", "10"])
+        .assert()
+        .code(124);
+
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= std::time::Duration::from_millis(400),
+        "timed out too early"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "took too long to timeout"
+    );
+}
+
 #[test]
 fn test_signal_forwarding_reports_correct_signal() {
     /*
@@ -1596,6 +1681,7 @@ fn test_signal_forwarding_reports_correct_signal() {
     thread::sleep(Duration::from_millis(200));
 
     /* Send SIGINT */
+    // SAFETY: kill() is safe with any valid pid/signal combo
     unsafe {
         libc::kill(pid, libc::SIGINT);
     }

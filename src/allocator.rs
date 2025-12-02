@@ -27,6 +27,7 @@ use core::alloc::{GlobalAlloc, Layout};
 #[allow(dead_code)] // only used in release builds via #[global_allocator]
 pub struct SystemAlloc;
 
+#[allow(clippy::multiple_unsafe_ops_per_block)]
 // SAFETY: GlobalAlloc requires the implementor to be thread-safe. libc's malloc/free
 // are thread-safe on macOS (and all modern POSIX systems). All methods follow the
 // GlobalAlloc contract: returning aligned, non-overlapping memory or null on failure.
@@ -62,13 +63,30 @@ unsafe impl GlobalAlloc for SystemAlloc {
     }
 
     #[inline]
-    unsafe fn realloc(&self, ptr: *mut u8, _layout: Layout, new_size: usize) -> *mut u8 {
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // SAFETY: Caller guarantees ptr was returned by this allocator's alloc/realloc.
         // realloc() is safe with any valid malloc'd pointer. new_size is bounded by
         // Layout invariants (caller must construct a valid Layout for the new size).
-        // Note: realloc doesn't guarantee alignment > 16 bytes, but GlobalAlloc::realloc
-        // documents that it may change alignment. Callers needing alignment must use
-        // alloc + copy + dealloc instead.
+        //
+        // # Warning: Alignment not preserved
+        //
+        // libc::realloc does NOT guarantee preservation of alignment > 16 bytes.
+        // If the original allocation used posix_memalign for alignment > 16, the
+        // reallocated memory may have only 16-byte alignment. This is permitted by
+        // GlobalAlloc::realloc which documents that alignment may change.
+        //
+        // Callers requiring alignment > 16 bytes MUST NOT use realloc. Instead:
+        //   1. Allocate new memory with alloc(new_layout)
+        //   2. Copy data from old to new
+        //   3. Deallocate old memory with dealloc(ptr, old_layout)
+        //
+        // Note: This debug_assert is intentionally stripped in release builds (panic=abort).
+        // In release, the alignment warning is documented-only; callers must comply by design.
+        debug_assert!(
+            layout.align() <= 16,
+            "realloc called with alignment > 16; alignment may not be preserved"
+        );
+        // SAFETY: see above - realloc is safe with valid malloc'd pointer
         unsafe { libc::realloc(ptr as *mut libc::c_void, new_size) as *mut u8 }
     }
 

@@ -29,7 +29,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.90"
+          toolchain: "1.91"
           components: clippy, rustfmt
 
       - name: Cache cargo
@@ -63,7 +63,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.90"
+          toolchain: "1.91"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -83,8 +83,8 @@ jobs:
         run: |
           SIZE=$(stat -f%z target/release/timeout)
           echo "Binary size: $SIZE bytes ($(($SIZE / 1024))KB)"
-          if [ $SIZE -gt 150000 ]; then
-            echo "ERROR: Binary too large (>150KB)"
+          if [ $SIZE -gt 100000 ]; then
+            echo "ERROR: Binary too large (>100KB)"
             exit 1
           fi
 
@@ -96,3 +96,34 @@ jobs:
             echo "ERROR: Too many symbols (>100), check strip settings"
             exit 1
           fi
+
+  # Run Miri on unit tests to detect undefined behavior in unsafe code.
+  # Focuses on pure-Rust modules: sync.rs (AtomicOnce), signal.rs, duration.rs,
+  # args.rs parsing, and runner.rs exit code logic.
+  #
+  # Tests using libc FFI (process spawning, I/O, signal delivery) are gated
+  # with #[cfg(not(miri))] since Miri cannot interpret macOS syscalls like
+  # posix_spawn*, kill, or write. These are covered by integration tests.
+  miri:
+    name: Miri (UB detection)
+    needs: lint
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly with Miri
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: miri
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Miri on unit tests
+        run: cargo +nightly miri test --lib
+        env:
+          # Disable isolation to allow some FFI stubs, though most libc calls
+          # will still be unsupported. This catches UB in pure Rust unsafe code.
+          MIRIFLAGS: -Zmiri-disable-isolation
