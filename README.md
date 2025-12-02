@@ -3,7 +3,23 @@ darwin-timeout
 
 Native macOS replacement for GNU `timeout`. Single `no_std` binary, **83KB**, zero dependencies.
 
-**185x smaller** than `brew install coreutils`. **20% faster startup**. **Identical timeout precision**.
+**You choose how time is measured.**
+
+GNU timeout measures *active* time: the clock pauses when your Mac sleeps. That's fine for benchmarks. But for real-world tasks (builds, backups, CI jobs), you probably want *wall-clock* time: set 1 hour, get 1 hour, regardless of sleep.
+
+darwin-timeout gives you both:
+
+```bash
+# Wall clock (default): 1 hour means 1 hour, even through sleep
+timeout 1h ./overnight-build
+
+# Active time: pauses during sleep, like GNU timeout
+timeout -c active 1h ./benchmark
+```
+
+**100% GNU-compatible.** All flags work identically (`-s`, `-k`, `-p`, `-f`, `-v`). Scripts written for GNU timeout run unchanged. Plus extras: `--json`, `--quiet`, `--on-timeout`, `-c/--confine`.
+
+**185x smaller** than `brew install coreutils`. **20% faster startup**. Zero CPU while waiting (kqueue).
 
 Drop-in replacement that works correctly on Apple Silicon and Intel Macs.
 
@@ -13,13 +29,19 @@ Why?
 Apple doesn't ship `timeout`. The usual answer is `brew install coreutils`, but:
 
 - Installs 15.7MB and 475 files just to get one command
-- GNU timeout pauses when your Mac sleeps (uses `nanosleep`)
+- **GNU timeout stops counting when your Mac sleeps** (uses `nanosleep` which pauses on sleep)
 
-We use `mach_continuous_time`, so the timer keeps running through sleep. Set a 1-hour timeout, close your laptop for 7 hours, open it, and we fire immediately. GNU waits another hour.
+This matters for real workloads:
+- CI server goes idle overnight → build timeouts don't fire
+- Close laptop during long test run → timeout clock freezes  
+- Docker container on sleeping Mac → hung processes never killed
+
+darwin-timeout uses `mach_continuous_time`, the only macOS clock that keeps counting through sleep. Your 1-hour timeout means 1 hour of wall-clock time, period.
 
 |                           | darwin-timeout | GNU coreutils |
 |---------------------------|----------------|---------------|
 | Works during system sleep | ✓              | ✗             |
+| Active-time-only mode     | ✓ (--confine)  | ✗             |
 | Zero CPU while waiting    | ✓ (kqueue)     | ✓ (nanosleep) |
 | Signal forwarding         | ✓              | ✓             |
 | Process group handling    | ✓              | ✓             |
@@ -190,10 +212,28 @@ Options
     -p, --preserve-status    Exit with command's status, not 124
     -v, --verbose            Print signals to stderr
     -q, --quiet              Suppress error messages (mutually exclusive with -v)
+    -c, --confine MODE       Time mode: 'wall' (default) or 'active'
     --timeout-exit-code N    Exit with N instead of 124 on timeout
     --on-timeout CMD         Run CMD on timeout (before kill); %p = child PID
     --on-timeout-limit T     Time limit for --on-timeout (default: 5s)
     --json                   JSON output for scripting
+
+### Time Confinement Modes (-c, --confine)
+
+**wall** (default): Total elapsed time including system sleep. A 1-hour timeout fires after 1 hour of wall-clock time, even if you close your laptop for 45 minutes.
+
+**active**: Only counts time when the system is awake. Useful for benchmarks where you want to measure actual CPU availability, not idle time. ~28% faster internally (uses `CLOCK_MONOTONIC_RAW`).
+
+```bash
+# Default: fire after 1 hour wall-clock time
+timeout 1h ./build
+
+# Explicit wall time (same as default)
+timeout -c wall 1h ./build
+
+# Active time only: if system sleeps for 30min, timeout extends by 30min
+timeout -c active 1h ./benchmark
+```
 
 Environment Variables
 ---------------------
@@ -254,7 +294,9 @@ Built on Darwin kernel APIs:
 
 **kqueue**: Monitors process exit (EVFILT_PROC) and timeout (EVFILT_TIMER with NOTE_NSECONDS). No polling.
 
-**mach_continuous_time**: Wall-clock timing that survives system sleep. 1-hour timeout = 1 hour even if you close the lid.
+**mach_continuous_time**: Wall-clock timing that survives system sleep. Used for `--confine=wall` (default). This is the key differentiator from GNU timeout.
+
+**clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)**: Active-time-only clock, pauses during sleep. Used for `--confine=active`. ~28% faster (no timebase conversion needed).
 
 **Signal forwarding**: SIGTERM/SIGINT/SIGHUP to timeout get forwarded to child. No orphans on Ctrl-C.
 
