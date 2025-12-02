@@ -93,6 +93,27 @@ impl Default for ArgValue<'_> {
     }
 }
 
+/// Time confinement mode - what clock to use for timeout measurement
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Confine {
+    /// Wall clock time (includes system sleep) - default, uses mach_continuous_time
+    #[default]
+    Wall,
+    /// Active/awake time only (excludes system sleep) - uses CLOCK_MONOTONIC_RAW
+    /// ~28% faster, useful for benchmarks where idle time shouldn't count
+    Active,
+}
+
+impl Confine {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "wall" => Some(Self::Wall),
+            "active" => Some(Self::Active),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Args<'a> {
     pub json: bool,
@@ -105,6 +126,7 @@ pub struct Args<'a> {
     pub timeout_exit_code: Option<u8>,
     pub on_timeout: Option<ArgValue<'a>>,
     pub on_timeout_limit: ArgValue<'a>,
+    pub confine: Confine,
     pub duration: Option<ArgValue<'a>>,
     pub command: Option<ArgValue<'a>>,
     pub args: Vec<ArgValue<'a>>,
@@ -123,6 +145,7 @@ pub struct OwnedArgs {
     pub timeout_exit_code: Option<u8>,
     pub on_timeout: Option<String>,
     pub on_timeout_limit: String,
+    pub confine: Confine,
     pub duration: Option<String>,
     pub command: Option<String>,
     pub args: Vec<String>,
@@ -142,6 +165,7 @@ impl<'a> Args<'a> {
             timeout_exit_code: self.timeout_exit_code,
             on_timeout: self.on_timeout.map(|v| v.into_owned()),
             on_timeout_limit: self.on_timeout_limit.into_owned(),
+            confine: self.confine,
             duration: self.duration.map(|v| v.into_owned()),
             command: self.command.map(|v| v.into_owned()),
             args: self.args.into_iter().map(|v| v.into_owned()).collect(),
@@ -207,10 +231,21 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
             continue;
         }
 
+        /* check for -- separator before the command-is-set check */
+        if arg == "--" {
+            saw_separator = true;
+            i += 1;
+            continue;
+        }
+
+        /* once command is set, all remaining args go to the command */
+        if result.command.is_some() {
+            result.args.push(ArgValue::Borrowed(arg));
+            i += 1;
+            continue;
+        }
+
         match arg.as_str() {
-            "--" => {
-                saw_separator = true;
-            }
             "--help" | "-h" => {
                 print_help();
                 // SAFETY: exit is always safe
@@ -303,6 +338,22 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                 result.on_timeout_limit = ArgValue::Borrowed(&s[19..]);
             }
 
+            "--confine" | "-c" => {
+                i += 1;
+                let val = args.get(i).ok_or_else(|| ParseError {
+                    message: "--confine requires a value (wall or active)".to_string(),
+                })?;
+                result.confine = Confine::from_str(val).ok_or_else(|| ParseError {
+                    message: format!("invalid confine mode: '{}' (use 'wall' or 'active')", val),
+                })?;
+            }
+            s if s.starts_with("--confine=") => {
+                let val = &s[10..];
+                result.confine = Confine::from_str(val).ok_or_else(|| ParseError {
+                    message: format!("invalid confine mode: '{}' (use 'wall' or 'active')", val),
+                })?;
+            }
+
             /* unknown long option */
             s if s.starts_with("--") => {
                 return Err(ParseError {
@@ -373,6 +424,31 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                                                 message: "-k requires a duration".to_string(),
                                             }
                                         })?));
+                                }
+                            }
+                            b'c' => {
+                                if j + 1 < bytes.len() {
+                                    let val = &s[j + 1..];
+                                    result.confine =
+                                        Confine::from_str(val).ok_or_else(|| ParseError {
+                                            message: format!(
+                                                "invalid confine mode: '{}' (use 'wall' or 'active')",
+                                                val
+                                            ),
+                                        })?;
+                                    break;
+                                } else {
+                                    i += 1;
+                                    let val = args.get(i).ok_or_else(|| ParseError {
+                                        message: "-c requires a value (wall or active)".to_string(),
+                                    })?;
+                                    result.confine =
+                                        Confine::from_str(val).ok_or_else(|| ParseError {
+                                            message: format!(
+                                                "invalid confine mode: '{}' (use 'wall' or 'active')",
+                                                val
+                                            ),
+                                        })?;
                                 }
                             }
                             c => {
@@ -461,6 +537,8 @@ Options:
       --timeout-exit-code <CODE>  Exit with CODE instead of 124 when timeout occurs
       --on-timeout <CMD>          Run CMD before sending the timeout signal (%p = PID)
       --on-timeout-limit <DUR>    Timeout for the --on-timeout hook command [default: 5s]
+  -c, --confine <MODE>            Time measurement mode: 'wall' (default, includes sleep) or
+                                  'active' (excludes system sleep, faster, for benchmarks)
       --json                      Output result as JSON (for scripting/CI)
   -h, --help                      Print help
   -V, --version                   Print version
@@ -500,6 +578,7 @@ mod tests {
         assert!(!args.json);
         assert!(args.timeout_exit_code.is_none());
         assert!(args.on_timeout.is_none());
+        assert_eq!(args.confine, Confine::Wall);
     }
 
     #[test]
@@ -632,5 +711,48 @@ mod tests {
     fn test_missing_signal_value() {
         let result = try_parse_from(["timeout", "-s"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_confine_wall() {
+        let args = try_parse_from(["timeout", "--confine=wall", "5s", "cmd"]).unwrap();
+        assert_eq!(args.confine, Confine::Wall);
+    }
+
+    #[test]
+    fn test_confine_active() {
+        let args = try_parse_from(["timeout", "--confine=active", "5s", "cmd"]).unwrap();
+        assert_eq!(args.confine, Confine::Active);
+    }
+
+    #[test]
+    fn test_confine_default() {
+        let args = try_parse_from(["timeout", "5s", "cmd"]).unwrap();
+        assert_eq!(args.confine, Confine::Wall); // default
+    }
+
+    #[test]
+    fn test_confine_invalid() {
+        let result = try_parse_from(["timeout", "--confine=invalid", "5s", "cmd"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("invalid confine mode"));
+    }
+
+    #[test]
+    fn test_confine_case_insensitive() {
+        let args = try_parse_from(["timeout", "--confine=ACTIVE", "5s", "cmd"]).unwrap();
+        assert_eq!(args.confine, Confine::Active);
+    }
+
+    #[test]
+    fn test_confine_short_flag() {
+        let args = try_parse_from(["timeout", "-c", "active", "5s", "cmd"]).unwrap();
+        assert_eq!(args.confine, Confine::Active);
+    }
+
+    #[test]
+    fn test_confine_short_flag_embedded() {
+        let args = try_parse_from(["timeout", "-cwall", "5s", "cmd"]).unwrap();
+        assert_eq!(args.confine, Confine::Wall);
     }
 }

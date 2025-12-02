@@ -24,7 +24,7 @@ use alloc::string::{String, ToString};
 use core::sync::atomic::{AtomicI32, Ordering};
 use core::time::Duration;
 
-use crate::args::OwnedArgs;
+use crate::args::{Confine, OwnedArgs};
 use crate::duration::{is_no_timeout, parse_duration};
 use crate::error::{Result, TimeoutError, exit_codes};
 use crate::process::{RawChild, RawExitStatus, SpawnError, spawn_command};
@@ -191,19 +191,20 @@ fn read_signal_from_pipe(fd: RawFd) -> Option<Signal> {
 }
 
 /*
- * mach_continuous_time()
+ * Timing APIs - two modes based on --confine flag:
  *
- * Tried a few things:
- * - Instant::now() uses mach_absolute_time under the hood, stops during sleep
- * - mach_absolute_time() same problem
- * - mach_continuous_time() keeps counting during sleep, fires when lid opens
+ * Wall mode (default): mach_continuous_time()
+ *   - Continues counting during system sleep
+ *   - A 1-hour timeout fires when you open the lid after 7 hours of sleep
+ *   - This is what most users expect from a timeout
  *
- * Timebase conversion is annoying. Apple Silicon is 1:1 nanoseconds, Intel
- * has weird ratios. We cache it since it never changes. u128 intermediate
- * avoids overflow (would take 292 years anyway).
+ * Active mode: clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
+ *   - Only counts awake/active time, pauses during sleep
+ *   - ~28% faster (no timebase conversion needed)
+ *   - Useful for benchmarks where idle time shouldn't count
  *
- * gettimeofday works for wall clock but can jump backwards. This is monotonic
- * and survives sleep.
+ * Empirically tested: CLOCK_MONOTONIC_RAW does NOT advance during pmset sleepnow.
+ * See tests/clock_api_comparison.rs for benchmarks and verification.
  */
 
 #[repr(C)]
@@ -215,7 +216,10 @@ struct MachTimebaseInfo {
 unsafe extern "C" {
     fn mach_continuous_time() -> u64;
     fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
+    fn clock_gettime_nsec_np(clock_id: libc::clockid_t) -> u64;
 }
+
+const CLOCK_MONOTONIC_RAW: libc::clockid_t = 4;
 
 /* get timebase ratio, cached forever */
 fn get_timebase_info() -> (u64, u64) {
@@ -232,9 +236,9 @@ fn get_timebase_info() -> (u64, u64) {
     })
 }
 
-/* current time in nanoseconds, monotonic (continues during system sleep) */
+/* Wall time in nanoseconds - includes system sleep (mach_continuous_time) */
 #[inline]
-fn precise_now_ns() -> u64 {
+fn wall_now_ns() -> u64 {
     let (numer, denom) = get_timebase_info();
     // SAFETY: mach_continuous_time() has no preconditions, always returns valid u64.
     let abs_time = unsafe { mach_continuous_time() };
@@ -247,6 +251,22 @@ fn precise_now_ns() -> u64 {
     /* Intel: need conversion. u128 intermediate avoids overflow. */
     #[allow(clippy::cast_possible_truncation)]
     ((u128::from(abs_time) * u128::from(numer) / u128::from(denom)) as u64)
+}
+
+/* Active time in nanoseconds - excludes system sleep (CLOCK_MONOTONIC_RAW) */
+#[inline]
+fn active_now_ns() -> u64 {
+    // SAFETY: clock_gettime_nsec_np with valid clock_id always succeeds on macOS
+    unsafe { clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) }
+}
+
+/* Get current time based on confine mode */
+#[inline]
+fn precise_now_ns(confine: Confine) -> u64 {
+    match confine {
+        Confine::Wall => wall_now_ns(),
+        Confine::Active => active_now_ns(),
+    }
 }
 
 /* max ns that fits in isize (~292 years on 64-bit) */
@@ -348,6 +368,7 @@ pub struct RunConfig {
     pub timeout_exit_code: u8,        /* exit code on timeout (default: 124) */
     pub on_timeout: Option<String>,   /* hook to run before killing (%p = PID) */
     pub on_timeout_limit: Duration,   /* how long hook gets to run */
+    pub confine: Confine,             /* wall (includes sleep) or active (excludes sleep) */
 }
 
 impl RunConfig {
@@ -381,6 +402,7 @@ impl RunConfig {
             timeout_exit_code: args.timeout_exit_code.unwrap_or(exit_codes::TIMEOUT),
             on_timeout: args.on_timeout.clone(),
             on_timeout_limit,
+            confine: args.confine,
         })
     }
 }
@@ -421,7 +443,7 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
     let pid = child.id() as i32;
 
     /* wait for exit or timeout */
-    let exit_result = wait_with_kqueue(child, pid, config.timeout)?;
+    let exit_result = wait_with_kqueue(child, pid, config.timeout, config.confine)?;
 
     match exit_result {
         WaitResult::Exited(status) => {
@@ -460,7 +482,7 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
 
     /* if --kill-after, give it a grace period then escalate to SIGKILL */
     if let Some(kill_after) = config.kill_after {
-        let grace_result = wait_with_kqueue(child, pid, kill_after)?;
+        let grace_result = wait_with_kqueue(child, pid, kill_after, config.confine)?;
 
         match grace_result {
             WaitResult::Exited(status) => {
@@ -545,8 +567,13 @@ fn errno() -> i32 {
  * for nanosecond precision, and optionally EVFILT_READ for signal pipe.
  * Direct libc because nix kqueue API keeps changing.
  */
-fn wait_with_kqueue(child: &mut RawChild, pid: i32, timeout: Duration) -> Result<WaitResult> {
-    let start_ns = precise_now_ns();
+fn wait_with_kqueue(
+    child: &mut RawChild,
+    pid: i32,
+    timeout: Duration,
+    confine: Confine,
+) -> Result<WaitResult> {
+    let start_ns = precise_now_ns(confine);
     let timeout_ns = duration_to_ns(timeout);
 
     /* Get signal pipe fd if available */
@@ -628,7 +655,7 @@ fn wait_with_kqueue(child: &mut RawChild, pid: i32, timeout: Duration) -> Result
 
     loop {
         /* check if we've passed deadline */
-        let now_ns = precise_now_ns();
+        let now_ns = precise_now_ns(confine);
         if now_ns >= deadline_ns {
             // SAFETY: kq is a valid fd, close is always safe
             unsafe { libc::close(kq) };
@@ -746,7 +773,7 @@ fn wait_with_kqueue(child: &mut RawChild, pid: i32, timeout: Duration) -> Result
  * Substitution: %p -> PID, %% -> literal %
  */
 fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
-    let start_ns = precise_now_ns();
+    let start_ns = precise_now_ns(config.confine);
 
     /* Expand %p to PID, %% to literal % */
     let expanded_cmd = cmd
@@ -771,14 +798,15 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
                 ran: false,
                 exit_code: None,
                 timed_out: false,
-                elapsed_ms: precise_now_ns().saturating_sub(start_ns) / 1_000_000,
+                elapsed_ms: precise_now_ns(config.confine).saturating_sub(start_ns) / 1_000_000,
             };
         }
     };
 
     /* Wait using kqueue for zero-CPU waiting */
-    let hook_wait_result = wait_for_hook_with_kqueue(&mut child, config.on_timeout_limit);
-    let elapsed_ms = precise_now_ns().saturating_sub(start_ns) / 1_000_000;
+    let hook_wait_result =
+        wait_for_hook_with_kqueue(&mut child, config.on_timeout_limit, config.confine);
+    let elapsed_ms = precise_now_ns(config.confine).saturating_sub(start_ns) / 1_000_000;
 
     match hook_wait_result {
         HookWaitResult::Exited(status) => {
@@ -835,10 +863,14 @@ enum HookWaitResult {
  * Wait for hook process using kqueue - zero CPU while waiting.
  * Simpler than wait_with_kqueue since we don't need signal forwarding.
  */
-fn wait_for_hook_with_kqueue(child: &mut RawChild, timeout: Duration) -> HookWaitResult {
+fn wait_for_hook_with_kqueue(
+    child: &mut RawChild,
+    timeout: Duration,
+    confine: Confine,
+) -> HookWaitResult {
     #[allow(clippy::cast_possible_wrap)]
     let pid = child.id() as i32;
-    let start_ns = precise_now_ns();
+    let start_ns = precise_now_ns(confine);
     let timeout_ns = duration_to_ns(timeout);
     let deadline_ns = start_ns.saturating_add(timeout_ns);
 
@@ -880,7 +912,7 @@ fn wait_for_hook_with_kqueue(child: &mut RawChild, timeout: Duration) -> HookWai
 
     loop {
         /* Recalculate remaining time (handles EINTR correctly) */
-        let now_ns = precise_now_ns();
+        let now_ns = precise_now_ns(confine);
         if now_ns >= deadline_ns {
             unsafe { libc::close(kq) };
             return HookWaitResult::TimedOut;
