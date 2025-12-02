@@ -1,7 +1,11 @@
 # Release workflow for darwin-timeout.
 #
-# Triggered when a version tag (v*) is pushed. Runs tests, builds binaries
-# for all platforms, and creates a GitHub release.
+# Triggered when a version tag (v*) is pushed. Builds binaries for all
+# platforms and creates a GitHub release.
+#
+# Note: Lint and tests are NOT run here - they already passed in CI before
+# the PR was merged. Tags should only be created from commits on main that
+# have passed CI.
 #
 # Produces:
 #   - timeout-<version>-macos-arm64.tar.gz      (Apple Silicon)
@@ -9,7 +13,7 @@
 #   - timeout-<version>-macos-universal.tar.gz  (Universal binary)
 #
 # Usage:
-#   git tag v1.0.0
+#   git tag -a v1.0.0 -m "v1.0.0"
 #   git push origin v1.0.0
 
 name: Release
@@ -37,20 +41,9 @@ jobs:
         with:
           toolchain: "1.90"
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-          components: clippy, rustfmt
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-
-      - name: Lint
-        run: |
-          cargo fmt --check
-          cargo clippy --all-targets -- -D warnings
-
-      # tests run in debug mode - release builds use no_std with custom panic
-      # handler that conflicts with std's panic handler in test harness
-      - name: Test
-        run: cargo test
 
       - name: Build for aarch64
         run: cargo build --release --target aarch64-apple-darwin
