@@ -19,3 +19,6 @@
 # Release artifacts (built locally)
 *.tar.gz
 *.zip
+
+# Copilot instructions (local only)
+.github/copilot-instructions.md
