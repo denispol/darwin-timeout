@@ -15,7 +15,7 @@ _timeout_completions() {
             COMPREPLY=($(compgen -W "$signals" -- "$cur"))
             return 0
             ;;
-        -k|--kill-after|--on-timeout-limit)
+        -k|--kill-after|--on-timeout-limit|--wait-for-file-timeout)
             # Duration suffixes
             COMPREPLY=($(compgen -W "1s 5s 10s 30s 1m 5m" -- "$cur"))
             return 0
@@ -29,13 +29,22 @@ _timeout_completions() {
             COMPREPLY=($(compgen -c -- "$cur"))
             return 0
             ;;
+        --wait-for-file)
+            # Files
+            COMPREPLY=($(compgen -f -- "$cur"))
+            return 0
+            ;;
+        -c|--confine)
+            COMPREPLY=($(compgen -W "wall active" -- "$cur"))
+            return 0
+            ;;
     esac
 
     # Options
     if [[ "$cur" == -* ]]; then
         opts="-s --signal -k --kill-after -p --preserve-status -f --foreground"
-        opts="$opts -v --verbose -q --quiet --timeout-exit-code --on-timeout"
-        opts="$opts --on-timeout-limit --json -h --help -V --version"
+        opts="$opts -v --verbose -q --quiet -c --confine --timeout-exit-code --on-timeout"
+        opts="$opts --on-timeout-limit --wait-for-file --wait-for-file-timeout --json -h --help -V --version"
         COMPREPLY=($(compgen -W "$opts" -- "$cur"))
         return 0
     fi

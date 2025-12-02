@@ -19,6 +19,7 @@ use darwin_timeout::args::{OwnedArgs, parse_args};
 use darwin_timeout::duration::parse_duration;
 use darwin_timeout::error::exit_codes;
 use darwin_timeout::runner::{RunConfig, RunResult, run_command, setup_signal_forwarding};
+use darwin_timeout::wait::wait_for_file;
 use darwin_timeout::{eprintln, println};
 
 /* import alloc crate in no_std mode */
@@ -176,6 +177,52 @@ fn run_main() -> u8 {
         }
     };
 
+    /* Wait for file if --wait-for-file is set (before starting command) */
+    if let Some(ref path) = args.wait_for_file {
+        let wait_timeout = args
+            .wait_for_file_timeout
+            .as_ref()
+            .map(|s| parse_duration(s))
+            .transpose();
+
+        let wait_timeout = match wait_timeout {
+            Ok(t) => t,
+            Err(e) => {
+                if !args.quiet {
+                    eprintln!("timeout: invalid --wait-for-file-timeout: {}", e);
+                }
+                return exit_codes::INTERNAL_ERROR;
+            }
+        };
+
+        if args.verbose && !args.quiet {
+            match wait_timeout {
+                Some(d) => {
+                    let secs = d.as_secs();
+                    let tenths = d.subsec_millis() / 100;
+                    eprintln!(
+                        "timeout: waiting for file '{}' (timeout: {}.{}s)",
+                        path, secs, tenths
+                    );
+                }
+                None => eprintln!("timeout: waiting for file '{}' (no timeout)", path),
+            }
+        }
+
+        if let Err(e) = wait_for_file(path, wait_timeout, config.confine) {
+            if args.json {
+                print_json_error(&e, 0);
+            } else if !args.quiet {
+                eprintln!("timeout: {}", e);
+            }
+            return e.exit_code();
+        }
+
+        if args.verbose && !args.quiet {
+            eprintln!("timeout: file '{}' found, starting command", path);
+        }
+    }
+
     /* Set up signal forwarding before spawning child */
     let _ = setup_signal_forwarding();
 
@@ -284,14 +331,9 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
 }
 
 fn print_json_error(err: &darwin_timeout::error::TimeoutError, elapsed_ms: u64) {
-    use darwin_timeout::error::{TimeoutError, exit_codes};
     const SCHEMA_VERSION: u8 = 2;
 
-    let exit_code = match err {
-        TimeoutError::CommandNotFound(_) => exit_codes::NOT_FOUND,
-        TimeoutError::PermissionDenied(_) => exit_codes::CANNOT_INVOKE,
-        _ => exit_codes::INTERNAL_ERROR,
-    };
+    let exit_code = err.exit_code();
     /* Escape control characters for valid JSON */
     let msg = escape_json_string(&err.to_string());
     println!(

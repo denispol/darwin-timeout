@@ -365,7 +365,6 @@ fn status_to_exit_code(status: &RawExitStatus) -> u8 {
 }
 
 /* runtime config built from CLI args */
-#[derive(Debug)]
 pub struct RunConfig {
     pub timeout: Duration,            /* how long before we send the signal */
     pub signal: Signal,               /* what to send (default: SIGTERM) */
@@ -804,7 +803,7 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
         Ok(c) => c,
         Err(e) => {
             if config.verbose && !config.quiet {
-                crate::eprintln!("timeout: on-timeout hook failed to start: {:?}", e);
+                crate::eprintln!("timeout: on-timeout hook failed to start: {}", e);
             }
             return HookResult {
                 ran: false,
@@ -961,9 +960,9 @@ fn wait_for_hook_with_kqueue(
                     Ok(Some(status)) => HookWaitResult::Exited(status),
                     Ok(None) => match child.wait() {
                         Ok(status) => HookWaitResult::Exited(status),
-                        Err(e) => HookWaitResult::Error(format!("{:?}", e)),
+                        Err(e) => HookWaitResult::Error(format!("{}", e)),
                     },
-                    Err(e) => HookWaitResult::Error(format!("{:?}", e)),
+                    Err(e) => HookWaitResult::Error(format!("{}", e)),
                 };
             }
             // SAFETY: kq is a valid fd from kqueue() above.
@@ -982,7 +981,7 @@ fn wait_for_hook_with_kqueue(
         if err_code == libc::ESRCH {
             return match child.wait() {
                 Ok(status) => HookWaitResult::Exited(status),
-                Err(e) => HookWaitResult::Error(format!("{:?}", e)),
+                Err(e) => HookWaitResult::Error(format!("{}", e)),
             };
         }
         return HookWaitResult::Error(format!("kqueue registration failed: errno {}", err_code));
@@ -994,7 +993,7 @@ fn wait_for_hook_with_kqueue(
     if event.filter == libc::EVFILT_PROC {
         match child.wait() {
             Ok(status) => HookWaitResult::Exited(status),
-            Err(e) => HookWaitResult::Error(format!("{:?}", e)),
+            Err(e) => HookWaitResult::Error(format!("{}", e)),
         }
     } else {
         HookWaitResult::TimedOut

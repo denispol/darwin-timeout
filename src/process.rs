@@ -127,7 +127,7 @@ impl RawExitStatus {
 }
 
 /// Error from process operations
-#[derive(Debug)]
+#[cfg_attr(test, derive(Debug))]
 pub enum SpawnError {
     /// Command not found in PATH
     NotFound(String),
@@ -139,6 +139,18 @@ pub enum SpawnError {
     Wait(i32),
     /// Invalid argument (null byte in string)
     InvalidArg,
+}
+
+impl core::fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotFound(s) => write!(f, "command not found: {s}"),
+            Self::PermissionDenied(s) => write!(f, "permission denied: {s}"),
+            Self::Spawn(e) => write!(f, "spawn error: errno {e}"),
+            Self::Wait(e) => write!(f, "wait error: errno {e}"),
+            Self::InvalidArg => write!(f, "invalid argument"),
+        }
+    }
 }
 
 impl RawChild {
