@@ -37,6 +37,7 @@ pub enum TimeoutError {
     Internal(String),
     WaitForFileTimeout(String), // file path that we timed out waiting for
     WaitForFileError(String, i32), // file path + errno from stat
+    TimebaseError,              // mach_timebase_info returned invalid data (zero denominator)
 }
 
 impl fmt::Display for TimeoutError {
@@ -55,6 +56,9 @@ impl fmt::Display for TimeoutError {
             Self::WaitForFileTimeout(path) => write!(f, "timed out waiting for file: {path}"),
             Self::WaitForFileError(path, errno) => {
                 write!(f, "error checking file '{path}': errno {errno}")
+            }
+            Self::TimebaseError => {
+                write!(f, "invalid mach timebase info (zero denominator)")
             }
         }
     }
@@ -75,7 +79,8 @@ impl TimeoutError {
             | Self::SignalError(_)
             | Self::ProcessGroupError(_)
             | Self::Internal(_)
-            | Self::WaitForFileError(_, _) => exit_codes::INTERNAL_ERROR,
+            | Self::WaitForFileError(_, _)
+            | Self::TimebaseError => exit_codes::INTERNAL_ERROR,
             // file-wait timeout uses same code as command timeout (124)
             Self::WaitForFileTimeout(_) => exit_codes::TIMEOUT,
         }
@@ -83,3 +88,28 @@ impl TimeoutError {
 }
 
 pub type Result<T> = core::result::Result<T, TimeoutError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timebase_error_display() {
+        let err = TimeoutError::TimebaseError;
+        let msg = alloc::format!("{}", err);
+        assert!(
+            msg.contains("zero denominator"),
+            "error message should mention zero denominator"
+        );
+    }
+
+    #[test]
+    fn test_timebase_error_exit_code() {
+        let err = TimeoutError::TimebaseError;
+        assert_eq!(
+            err.exit_code(),
+            exit_codes::INTERNAL_ERROR,
+            "timebase error should return internal error exit code"
+        );
+    }
+}

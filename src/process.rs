@@ -6,6 +6,10 @@
  *
  * posix_spawn is more efficient than fork+exec on modern systems -
  * it can use vfork internally and avoids copying page tables.
+ *
+ * On macOS, posix_spawnattr_t and posix_spawn_file_actions_t are opaque
+ * pointers (*mut c_void) managed by the C library. We use RAII wrappers
+ * to ensure proper initialization and cleanup via Drop.
  */
 
 use alloc::ffi::CString;
@@ -15,62 +19,14 @@ use core::ffi::c_char;
 use core::ptr;
 
 /*
- * libc types and functions for posix_spawn.
- * we declare them here to avoid depending on libc crate's std feature.
+ * FFI declarations for functions not in libc crate or needing special handling.
+ * Most posix_spawn functions are available via libc::*.
  */
 
-#[allow(non_camel_case_types)]
-type pid_t = i32;
-
-/* opaque types - we only use pointers to them */
-#[repr(C)]
-#[allow(non_camel_case_types)]
-struct posix_spawn_file_actions_t {
-    _opaque: [u8; 80], /* macOS size */
-}
-
-#[repr(C)]
-#[allow(non_camel_case_types)]
-struct posix_spawnattr_t {
-    _opaque: [u8; 336], /* macOS size */
-}
-
-/* posix_spawn flags */
-const POSIX_SPAWN_SETPGROUP: i16 = 0x0002;
-
 unsafe extern "C" {
-    fn posix_spawnp(
-        pid: *mut pid_t,
-        file: *const c_char,
-        file_actions: *const posix_spawn_file_actions_t,
-        attrp: *const posix_spawnattr_t,
-        argv: *const *const c_char,
-        envp: *const *const c_char,
-    ) -> i32;
-
-    fn posix_spawn_file_actions_init(file_actions: *mut posix_spawn_file_actions_t) -> i32;
-    fn posix_spawn_file_actions_destroy(file_actions: *mut posix_spawn_file_actions_t) -> i32;
-    #[allow(dead_code)] /* for future fd redirection support */
-    fn posix_spawn_file_actions_adddup2(
-        file_actions: *mut posix_spawn_file_actions_t,
-        fildes: i32,
-        newfildes: i32,
-    ) -> i32;
-
-    fn posix_spawnattr_init(attr: *mut posix_spawnattr_t) -> i32;
-    fn posix_spawnattr_destroy(attr: *mut posix_spawnattr_t) -> i32;
-    fn posix_spawnattr_setflags(attr: *mut posix_spawnattr_t, flags: i16) -> i32;
-    fn posix_spawnattr_setpgroup(attr: *mut posix_spawnattr_t, pgroup: pid_t) -> i32;
-
-    fn waitpid(pid: pid_t, status: *mut i32, options: i32) -> pid_t;
-    fn kill(pid: pid_t, sig: i32) -> i32;
-
     /* environ is a global variable pointing to the environment */
     static environ: *const *const c_char;
 }
-
-/* waitpid options */
-const WNOHANG: i32 = 1;
 
 /* errno values */
 const ENOENT: i32 = 2;
@@ -81,10 +37,116 @@ const EPERM: i32 = 1;
 /* signals */
 const SIGKILL: i32 = 9;
 
+/*
+ * RAII wrapper for posix_spawnattr_t.
+ *
+ * On macOS, posix_spawnattr_t is an opaque pointer (*mut c_void).
+ * The init function allocates internal storage, and destroy frees it.
+ * This wrapper ensures cleanup even on early return or panic.
+ */
+struct SpawnAttr {
+    inner: libc::posix_spawnattr_t,
+    initialized: bool,
+}
+
+impl SpawnAttr {
+    /* create and initialize spawn attributes */
+    fn new() -> Result<Self, i32> {
+        let mut attr: libc::posix_spawnattr_t = ptr::null_mut();
+        // SAFETY: attr is a valid pointer location for posix_spawnattr_init to populate
+        let ret = unsafe { libc::posix_spawnattr_init(&mut attr) };
+        if ret != 0 {
+            return Err(ret);
+        }
+        Ok(Self {
+            inner: attr,
+            initialized: true,
+        })
+    }
+
+    /* set flags on the spawn attributes */
+    fn set_flags(&mut self, flags: libc::c_short) -> Result<(), i32> {
+        // SAFETY: self.inner was initialized in new()
+        let ret = unsafe { libc::posix_spawnattr_setflags(&mut self.inner, flags) };
+        if ret != 0 {
+            return Err(ret);
+        }
+        Ok(())
+    }
+
+    /* set process group (0 = own group) */
+    fn set_pgroup(&mut self, pgroup: libc::pid_t) -> Result<(), i32> {
+        // SAFETY: self.inner was initialized in new()
+        let ret = unsafe { libc::posix_spawnattr_setpgroup(&mut self.inner, pgroup) };
+        if ret != 0 {
+            return Err(ret);
+        }
+        Ok(())
+    }
+
+    /* get raw pointer for FFI calls */
+    fn as_ptr(&self) -> *const libc::posix_spawnattr_t {
+        &self.inner
+    }
+}
+
+impl Drop for SpawnAttr {
+    fn drop(&mut self) {
+        if self.initialized {
+            // SAFETY: self.inner was initialized in new() and hasn't been destroyed yet
+            unsafe {
+                libc::posix_spawnattr_destroy(&mut self.inner);
+            }
+        }
+    }
+}
+
+/*
+ * RAII wrapper for posix_spawn_file_actions_t.
+ *
+ * Same pattern as SpawnAttr - ensures cleanup via Drop.
+ */
+struct SpawnFileActions {
+    inner: libc::posix_spawn_file_actions_t,
+    initialized: bool,
+}
+
+impl SpawnFileActions {
+    /* create and initialize file actions */
+    fn new() -> Result<Self, i32> {
+        let mut actions: libc::posix_spawn_file_actions_t = ptr::null_mut();
+        // SAFETY: actions is a valid pointer location for init to populate
+        let ret = unsafe { libc::posix_spawn_file_actions_init(&mut actions) };
+        if ret != 0 {
+            return Err(ret);
+        }
+        Ok(Self {
+            inner: actions,
+            initialized: true,
+        })
+    }
+
+    /* get raw pointer for FFI calls */
+    fn as_ptr(&self) -> *const libc::posix_spawn_file_actions_t {
+        &self.inner
+    }
+}
+
+impl Drop for SpawnFileActions {
+    fn drop(&mut self) {
+        if self.initialized {
+            // SAFETY: self.inner was initialized in new() and hasn't been destroyed yet
+            unsafe {
+                libc::posix_spawn_file_actions_destroy(&mut self.inner);
+            }
+        }
+    }
+}
+
 /// Raw child process handle - no_std replacement for std::process::Child
 #[derive(Debug)]
 pub struct RawChild {
-    pid: pid_t,
+    pid: libc::pid_t,
     exited: bool,
 }
 
@@ -168,7 +230,7 @@ impl RawChild {
 
         let mut status: i32 = 0;
         // SAFETY: pid is valid from spawn, status is valid pointer
-        let ret = unsafe { waitpid(self.pid, &mut status, 0) };
+        let ret = unsafe { libc::waitpid(self.pid, &mut status, 0) };
 
         if ret < 0 {
             return Err(SpawnError::Wait(errno()));
@@ -186,7 +248,7 @@ impl RawChild {
 
         let mut status: i32 = 0;
         // SAFETY: pid is valid from spawn, status is valid pointer
-        let ret = unsafe { waitpid(self.pid, &mut status, WNOHANG) };
+        let ret = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
 
         if ret < 0 {
             return Err(SpawnError::Wait(errno()));
@@ -208,7 +270,7 @@ impl RawChild {
         }
 
         // SAFETY: kill is safe with any pid/signal
-        let ret = unsafe { kill(self.pid, SIGKILL) };
+        let ret = unsafe { libc::kill(self.pid, SIGKILL) };
 
         if ret < 0 {
             let e = errno();
@@ -255,62 +317,36 @@ pub fn spawn_command(
     }
     argv_ptrs.push(ptr::null());
 
-    /* initialize spawn attributes */
-    // SAFETY: zeroed() produces a valid zero-initialized struct for posix_spawnattr_t
-    let mut attr: posix_spawnattr_t = unsafe { core::mem::zeroed() };
-    // SAFETY: attr is valid zeroed struct
-    let ret = unsafe { posix_spawnattr_init(&mut attr) };
-    if ret != 0 {
-        return Err(SpawnError::Spawn(ret));
-    }
+    /* initialize spawn attributes using RAII wrapper */
+    let mut attr = SpawnAttr::new().map_err(SpawnError::Spawn)?;
 
     /* set process group if requested */
     if use_process_group {
-        // SAFETY: attr was initialized above. Both calls configure the same attr,
-        // sharing the invariant that attr is a valid initialized posix_spawnattr_t.
-        #[allow(clippy::multiple_unsafe_ops_per_block)]
-        unsafe {
-            posix_spawnattr_setflags(&mut attr, POSIX_SPAWN_SETPGROUP);
-            posix_spawnattr_setpgroup(&mut attr, 0); /* own group */
-        }
+        #[allow(clippy::cast_possible_truncation)]
+        attr.set_flags(libc::POSIX_SPAWN_SETPGROUP as libc::c_short)
+            .map_err(SpawnError::Spawn)?;
+        attr.set_pgroup(0).map_err(SpawnError::Spawn)?; /* own group */
     }
 
-    /* initialize file actions (inherit stdin/stdout/stderr) */
-    // SAFETY: zeroed() produces a valid zero-initialized struct for posix_spawn_file_actions_t
-    let mut file_actions: posix_spawn_file_actions_t = unsafe { core::mem::zeroed() };
-    // SAFETY: file_actions is valid zeroed struct
-    let ret = unsafe { posix_spawn_file_actions_init(&mut file_actions) };
-    if ret != 0 {
-        // SAFETY: attr was initialized
-        unsafe { posix_spawnattr_destroy(&mut attr) };
-        return Err(SpawnError::Spawn(ret));
-    }
-
-    /* inherit standard fds (0, 1, 2) - they're inherited by default,
-     * but we can explicitly dup2 if needed. For now, inheritance is fine. */
+    /* initialize file actions using RAII wrapper (inherit stdin/stdout/stderr) */
+    let file_actions = SpawnFileActions::new().map_err(SpawnError::Spawn)?;
 
     /* spawn the process */
-    let mut pid: pid_t = 0;
-    // SAFETY: all pointers are valid, environ is the process environment
+    let mut pid: libc::pid_t = 0;
+    // SAFETY: all pointers are valid, environ is the process environment.
+    // attr and file_actions are initialized RAII wrappers.
     let ret = unsafe {
-        posix_spawnp(
+        libc::posix_spawnp(
             &mut pid,
             cmd_cstr.as_ptr(),
-            &file_actions,
-            &attr,
-            argv_ptrs.as_ptr(),
-            environ,
+            file_actions.as_ptr(),
+            attr.as_ptr(),
+            argv_ptrs.as_ptr() as *const *mut c_char,
+            environ as *const *mut c_char,
         )
     };
 
-    /* cleanup */
-    // SAFETY: both were initialized above. Destroy calls share the invariant that
-    // the structs are valid and initialized, and are safe to call in any order.
-    #[allow(clippy::multiple_unsafe_ops_per_block)]
-    unsafe {
-        posix_spawn_file_actions_destroy(&mut file_actions);
-        posix_spawnattr_destroy(&mut attr);
-    }
+    /* RAII: attr and file_actions are automatically destroyed when they go out of scope */
 
     if ret != 0 {
         return Err(match ret {

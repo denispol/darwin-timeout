@@ -47,30 +47,47 @@ use core::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 /* cached timebase (packed as numer << 32 | denom, 0 = not initialized) */
 static TIMEBASE_CACHE: AtomicU64 = AtomicU64::new(0);
 
-/* current time in nanoseconds */
+/* Validate and cache timebase info. Returns None if denom is zero (invalid FFI data). */
 #[inline]
-fn precise_now_ns() -> u64 {
+fn get_timebase_info() -> Option<(u64, u64)> {
     let cached = TIMEBASE_CACHE.load(AtomicOrdering::Relaxed);
-    let (numer, denom) = if cached == 0 {
-        let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
-        // SAFETY: info is valid MachTimebaseInfo struct
-        unsafe {
-            mach_timebase_info(&raw mut info);
-        }
-        let packed = (u64::from(info.numer) << 32) | u64::from(info.denom);
-        TIMEBASE_CACHE.store(packed, AtomicOrdering::Relaxed);
-        (u64::from(info.numer), u64::from(info.denom))
-    } else {
-        ((cached >> 32), (cached & 0xFFFF_FFFF))
-    };
+    if cached != 0 {
+        return Some(((cached >> 32), (cached & 0xFFFF_FFFF)));
+    }
+
+    let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
+    // SAFETY: info is valid MachTimebaseInfo struct
+    unsafe {
+        mach_timebase_info(&raw mut info);
+    }
+
+    /* validate FFI data - denom == 0 would cause division by zero */
+    if info.denom == 0 {
+        return None;
+    }
+
+    let packed = (u64::from(info.numer) << 32) | u64::from(info.denom);
+    TIMEBASE_CACHE.store(packed, AtomicOrdering::Relaxed);
+    Some((u64::from(info.numer), u64::from(info.denom)))
+}
+
+/* current time in nanoseconds. returns None if timebase info is invalid. */
+#[inline]
+fn precise_now_ns() -> Option<u64> {
+    let (numer, denom) = get_timebase_info()?;
 
     // SAFETY: mach_continuous_time has no preconditions
     let abs_time = unsafe { mach_continuous_time() };
     if numer == denom {
-        return abs_time;
+        return Some(abs_time);
     }
+
+    /* use checked_div as defense-in-depth (denom already validated above) */
+    let intermediate = u128::from(abs_time) * u128::from(numer);
+    let result = intermediate.checked_div(u128::from(denom))?;
+
     #[allow(clippy::cast_possible_truncation)]
-    ((u128::from(abs_time) * u128::from(numer) / u128::from(denom)) as u64)
+    Some(result as u64)
 }
 
 /// Resolve duration/command from args and TIMEOUT env var.
@@ -226,9 +243,12 @@ fn run_main() -> u8 {
     /* Set up signal forwarding before spawning child */
     let _ = setup_signal_forwarding();
 
-    let start_ns = precise_now_ns();
+    let start_ns = precise_now_ns().unwrap_or(0);
     let result = run_command(&command, &extra_args, &config);
-    let elapsed_ms = (precise_now_ns() - start_ns) / 1_000_000;
+    let elapsed_ms = precise_now_ns()
+        .unwrap_or(start_ns)
+        .saturating_sub(start_ns)
+        / 1_000_000;
 
     match result {
         Ok(run_result) => {
