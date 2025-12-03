@@ -72,18 +72,24 @@ pub fn setup_signal_forwarding() -> Option<RawFd> {
     // Multiple ops share the same invariant (fd validity).
     #[allow(clippy::multiple_unsafe_ops_per_block)]
     unsafe {
+        /* non-blocking mode is required - signal handler must not block */
         let flags = libc::fcntl(read_fd, libc::F_GETFL);
-        /* Only set O_NONBLOCK if F_GETFL succeeded (flags >= 0) */
-        if flags >= 0 {
-            libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        if flags < 0 || libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            libc::close(read_fd);
+            libc::close(write_fd);
+            return None;
         }
-        /* Signal handler must not block - set write_fd non-blocking too */
         let write_flags = libc::fcntl(write_fd, libc::F_GETFL);
-        if write_flags >= 0 {
-            libc::fcntl(write_fd, libc::F_SETFL, write_flags | libc::O_NONBLOCK);
+        if write_flags < 0
+            || libc::fcntl(write_fd, libc::F_SETFL, write_flags | libc::O_NONBLOCK) < 0
+        {
+            libc::close(read_fd);
+            libc::close(write_fd);
+            return None;
         }
-        libc::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC);
-        libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        /* CLOEXEC is best-effort - fd leak to child is harmless */
+        let _ = libc::fcntl(read_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        let _ = libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
     }
 
     /* Try to claim the signal pipe slot first, before setting up handlers */
@@ -229,36 +235,59 @@ unsafe extern "C" {
 
 const CLOCK_MONOTONIC_RAW: libc::clockid_t = 4;
 
-/* get timebase ratio, cached forever */
-fn get_timebase_info() -> (u64, u64) {
+/* get timebase ratio, cached forever. returns Err if denom is zero (invalid FFI data). */
+fn get_timebase_info() -> Result<(u64, u64)> {
     static TIMEBASE: AtomicOnce<(u64, u64)> = AtomicOnce::new();
 
-    *TIMEBASE.get_or_init(|| {
-        let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
-        // SAFETY: info is a valid MachTimebaseInfo struct with correct layout (#[repr(C)]).
-        // mach_timebase_info always succeeds on macOS and fills in numer/denom.
-        unsafe {
-            mach_timebase_info(&raw mut info);
-        }
-        (u64::from(info.numer), u64::from(info.denom))
-    })
+    /* check if already cached */
+    if let Some(&cached) = TIMEBASE.get() {
+        return Ok(cached);
+    }
+
+    /* fetch from FFI */
+    let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
+    // SAFETY: info is a valid MachTimebaseInfo struct with correct layout (#[repr(C)]).
+    // mach_timebase_info always succeeds on macOS and fills in numer/denom.
+    unsafe {
+        mach_timebase_info(&raw mut info);
+    }
+
+    /* validate FFI data - denom == 0 would cause division by zero */
+    if info.denom == 0 {
+        return Err(TimeoutError::TimebaseError);
+    }
+
+    let result = (u64::from(info.numer), u64::from(info.denom));
+    /* cache only on success */
+    let _ = TIMEBASE.set(result);
+    Ok(result)
 }
 
-/* Wall time in nanoseconds - includes system sleep (mach_continuous_time) */
+/* Wall time in nanoseconds - includes system sleep (mach_continuous_time).
+ *
+ * # Errors
+ * Returns `TimebaseError` if mach_timebase_info returned invalid data (zero denominator).
+ */
 #[inline]
-fn wall_now_ns() -> u64 {
-    let (numer, denom) = get_timebase_info();
+fn wall_now_ns() -> Result<u64> {
+    let (numer, denom) = get_timebase_info()?;
     // SAFETY: mach_continuous_time() has no preconditions, always returns valid u64.
     let abs_time = unsafe { mach_continuous_time() };
 
     /* Apple Silicon: numer == denom == 1, fast path avoids division */
     if numer == denom {
-        return abs_time;
+        return Ok(abs_time);
     }
 
-    /* Intel: need conversion. u128 intermediate avoids overflow. */
+    /* Intel: need conversion. u128 intermediate avoids overflow.
+     * Use checked_div as defense-in-depth (denom already validated above). */
+    let intermediate = u128::from(abs_time) * u128::from(numer);
+    let result = intermediate
+        .checked_div(u128::from(denom))
+        .ok_or(TimeoutError::TimebaseError)?;
+
     #[allow(clippy::cast_possible_truncation)]
-    ((u128::from(abs_time) * u128::from(numer) / u128::from(denom)) as u64)
+    Ok(result as u64)
 }
 
 /* Active time in nanoseconds - excludes system sleep (CLOCK_MONOTONIC_RAW) */
@@ -268,12 +297,16 @@ fn active_now_ns() -> u64 {
     unsafe { clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) }
 }
 
-/* Get current time based on confine mode */
+/* Get current time based on confine mode.
+ *
+ * # Errors
+ * Returns `TimebaseError` if wall mode and mach_timebase_info returned invalid data.
+ */
 #[inline]
-fn precise_now_ns(confine: Confine) -> u64 {
+fn precise_now_ns(confine: Confine) -> Result<u64> {
     match confine {
         Confine::Wall => wall_now_ns(),
-        Confine::Active => active_now_ns(),
+        Confine::Active => Ok(active_now_ns()),
     }
 }
 
@@ -584,7 +617,7 @@ fn wait_with_kqueue(
     timeout: Duration,
     confine: Confine,
 ) -> Result<WaitResult> {
-    let start_ns = precise_now_ns(confine);
+    let start_ns = precise_now_ns(confine)?;
     let timeout_ns = duration_to_ns(timeout);
 
     /* Get signal pipe fd if available */
@@ -666,7 +699,7 @@ fn wait_with_kqueue(
 
     loop {
         /* check if we've passed deadline */
-        let now_ns = precise_now_ns(confine);
+        let now_ns = precise_now_ns(confine)?;
         if now_ns >= deadline_ns {
             // SAFETY: kq is a valid fd, close is always safe
             unsafe { libc::close(kq) };
@@ -784,7 +817,8 @@ fn wait_with_kqueue(
  * Substitution: %p -> PID, %% -> literal %
  */
 fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
-    let start_ns = precise_now_ns(config.confine);
+    /* use 0 as fallback for timing if timebase fails - hook timing is best-effort */
+    let start_ns = precise_now_ns(config.confine).unwrap_or(0);
 
     /* Expand %p to PID, %% to literal % */
     let expanded_cmd = cmd
@@ -809,7 +843,10 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
                 ran: false,
                 exit_code: None,
                 timed_out: false,
-                elapsed_ms: precise_now_ns(config.confine).saturating_sub(start_ns) / 1_000_000,
+                elapsed_ms: precise_now_ns(config.confine)
+                    .unwrap_or(0)
+                    .saturating_sub(start_ns)
+                    / 1_000_000,
             };
         }
     };
@@ -817,7 +854,10 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
     /* Wait using kqueue for zero-CPU waiting */
     let hook_wait_result =
         wait_for_hook_with_kqueue(&mut child, config.on_timeout_limit, config.confine);
-    let elapsed_ms = precise_now_ns(config.confine).saturating_sub(start_ns) / 1_000_000;
+    let elapsed_ms = precise_now_ns(config.confine)
+        .unwrap_or(0)
+        .saturating_sub(start_ns)
+        / 1_000_000;
 
     match hook_wait_result {
         HookWaitResult::Exited(status) => {
@@ -881,7 +921,8 @@ fn wait_for_hook_with_kqueue(
 ) -> HookWaitResult {
     #[allow(clippy::cast_possible_wrap)]
     let pid = child.id() as i32;
-    let start_ns = precise_now_ns(confine);
+    /* use 0 as fallback for timing if timebase fails - hook timing is best-effort */
+    let start_ns = precise_now_ns(confine).unwrap_or(0);
     let timeout_ns = duration_to_ns(timeout);
     let deadline_ns = start_ns.saturating_add(timeout_ns);
 
@@ -924,7 +965,7 @@ fn wait_for_hook_with_kqueue(
 
     loop {
         /* Recalculate remaining time (handles EINTR correctly) */
-        let now_ns = precise_now_ns(confine);
+        let now_ns = precise_now_ns(confine).unwrap_or(deadline_ns); /* on error, trigger timeout */
         if now_ns >= deadline_ns {
             // SAFETY: kq is a valid fd from kqueue() above.
             unsafe { libc::close(kq) };
@@ -1107,5 +1148,39 @@ mod tests {
         let fake_pid = 99999i32;
         let result = send_signal(fake_pid, Signal::SIGTERM, true);
         assert!(result.is_ok(), "ESRCH should be handled gracefully");
+    }
+
+    /* test that timebase validation works on the happy path (denom != 0) */
+    #[test]
+    #[cfg_attr(miri, ignore)] /* mach_timebase_info is FFI */
+    fn test_get_timebase_info_succeeds() {
+        let result = get_timebase_info();
+        assert!(result.is_ok(), "timebase info should succeed on macOS");
+        let (numer, denom) = result.unwrap();
+        assert!(numer > 0, "numer should be positive");
+        assert!(denom > 0, "denom should be positive (validated)");
+    }
+
+    /* test that wall_now_ns returns a reasonable value */
+    #[test]
+    #[cfg_attr(miri, ignore)] /* mach_continuous_time is FFI */
+    fn test_wall_now_ns_succeeds() {
+        let result = wall_now_ns();
+        assert!(result.is_ok(), "wall_now_ns should succeed on macOS");
+        let ns = result.unwrap();
+        assert!(ns > 0, "time should be positive");
+    }
+
+    /* test that precise_now_ns works in both modes */
+    #[test]
+    #[cfg_attr(miri, ignore)] /* uses FFI */
+    fn test_precise_now_ns_both_modes() {
+        use crate::args::Confine;
+
+        let wall = precise_now_ns(Confine::Wall);
+        assert!(wall.is_ok(), "wall mode should succeed");
+
+        let active = precise_now_ns(Confine::Active);
+        assert!(active.is_ok(), "active mode should succeed");
     }
 }
