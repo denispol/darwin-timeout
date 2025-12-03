@@ -565,7 +565,7 @@ fn print_help() {
     crate::io::print_str(
         r#"Usage: timeout [OPTIONS] DURATION COMMAND [ARG]...
 
-Run a command with a time limit.
+Enforce a strict wall-clock deadline on a command (sleep-aware).
 
 Arguments:
   DURATION  Time before sending signal (30, 30s, 1.5m, 2h, 1d)
