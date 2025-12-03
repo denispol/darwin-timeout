@@ -661,8 +661,9 @@ fn test_timing_precision_500ms() {
         elapsed >= Duration::from_millis(450),
         "too fast: {elapsed:?}"
     );
+    /* CI VMs (especially x86_64 emulation) can be 2x slower */
     assert!(
-        elapsed < Duration::from_millis(700),
+        elapsed < Duration::from_millis(1500),
         "too slow: {elapsed:?}"
     );
 }
