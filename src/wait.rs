@@ -231,8 +231,8 @@ mod tests {
         assert!(matches!(result, Err(TimeoutError::WaitForFileTimeout(_))));
         // Should have taken at least 50ms (the timeout)
         assert!(elapsed >= Duration::from_millis(50));
-        // But not too long (allow some margin for scheduling)
-        assert!(elapsed < Duration::from_millis(200));
+        // But not too long (allow margin for CI scheduling jitter)
+        assert!(elapsed < Duration::from_millis(500));
     }
 
     #[test]

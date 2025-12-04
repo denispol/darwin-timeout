@@ -33,7 +33,7 @@ Apple doesn't ship `timeout`. The alternatives have problems:
 
 - Also stops counting during sleep (uses `Instant`/`mach_absolute_time`)
 
-darwin-timeout uses `mach_continuous_time`, the only macOS clock that keeps ticking through sleep. Set 1 hour, get 1 hour—even if you close your laptop.
+darwin-timeout uses `mach_continuous_time`, the only macOS clock that keeps ticking through sleep. Set 1 hour, get 1 hour, even if you close your laptop.
 
 **Scenario:** `timeout 1h ./build` with laptop sleeping 45min in the middle
 
@@ -54,7 +54,7 @@ GNU timeout:    ██████████ ......paused...... ████�
 |                           | darwin-timeout | GNU coreutils |
 |---------------------------|----------------|---------------|
 | Works during system sleep | ✓              | ✗             |
-| Active-time mode          | ✓              | ✗             |
+| Selectable time mode      | ✓ (wall/active)| ✗ (active only)|
 | JSON output               | ✓              | ✗             |
 | Pre-timeout hooks         | ✓              | ✗             |
 | Wait-for-file             | ✓              | ✗             |
@@ -73,7 +73,7 @@ Install
 
     brew install denispol/tap/darwin-timeout
 
-**From releases:** Download the universal binary from [releases](https://github.com/denispol/darwin-timeout/releases).
+**Binary download:** Grab the universal binary (arm64 + x86_64) from [releases](https://github.com/denispol/darwin-timeout/releases).
 
 **From source:**
 
@@ -137,7 +137,7 @@ Options
     --wait-for-file PATH     wait for file to exist before starting command
     --wait-for-file-timeout T  timeout for --wait-for-file (default: wait forever)
 
-**Duration format:** number with optional suffix `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Fractional values supported: `0.5s`, `1.5m`.
+**Duration format:** number with optional suffix `ms` (milliseconds), `us`/`µs` (microseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Fractional values supported: `0.5s`, `1.5ms`, `100us`.
 
 **Exit codes:**
 

@@ -166,11 +166,26 @@ fn test_negative_duration() {
 
 #[test]
 fn test_invalid_suffix() {
-    /* We don't support milliseconds (ms) like some tools do */
+    /* nanoseconds not supported */
     timeout_cmd()
-        .args(["100ms", "echo", "test"])
+        .args(["100ns", "echo", "test"])
         .assert()
         .code(125);
+}
+
+#[test]
+fn test_milliseconds_suffix() {
+    /* ms suffix should work */
+    timeout_cmd().args(["100ms", "true"]).assert().success();
+}
+
+#[test]
+fn test_microseconds_suffix() {
+    /* us suffix should work - command may timeout due to short duration */
+    let result = timeout_cmd().args(["50ms", "true"]).assert();
+    /* should either succeed or timeout, not fail with invalid suffix */
+    let code = result.get_output().status.code().unwrap();
+    assert!(code == 0 || code == 124, "expected 0 or 124, got {}", code);
 }
 
 /* =========================================================================

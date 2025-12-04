@@ -1,7 +1,7 @@
 /*
  * duration.rs
  *
- * Parse "30s", "5m", "1.5h", "0.5d". No suffix means seconds.
+ * Parse "30s", "100ms", "500us", "5m", "1.5h", "0.5d". No suffix means seconds.
  * Zero means run forever (useful for process group handling without timeout).
  *
  * Uses integer math internally (nanosecond precision) to avoid pulling in
@@ -14,7 +14,7 @@ use core::time::Duration;
 
 use crate::error::{Result, TimeoutError};
 
-/// Parse "30", "30s", "1.5m", "2h", "0.5d". No suffix = seconds.
+/// Parse "30", "30s", "100ms", "500us", "1.5m", "2h", "0.5d". No suffix = seconds.
 ///
 /// # Examples
 ///
@@ -24,6 +24,8 @@ use crate::error::{Result, TimeoutError};
 ///
 /// assert_eq!(parse_duration("30").unwrap(), Duration::from_secs(30));
 /// assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
+/// assert_eq!(parse_duration("100ms").unwrap(), Duration::from_millis(100));
+/// assert_eq!(parse_duration("500us").unwrap(), Duration::from_micros(500));
 /// assert_eq!(parse_duration("1.5m").unwrap(), Duration::from_secs(90));
 /// assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
 /// assert_eq!(parse_duration("0.5d").unwrap(), Duration::from_secs(43200));
@@ -50,6 +52,8 @@ pub fn parse_duration(input: &str) -> Result<Duration> {
     /* multiplier in nanoseconds, case insensitive */
     let multiplier: u128 = match suffix.to_ascii_lowercase().as_str() {
         "" | "s" => 1_000_000_000, // 1 second
+        "ms" => 1_000_000,         // 1 millisecond
+        "us" | "µs" => 1_000,      // 1 microsecond (ascii or unicode micro sign)
         "m" => 60_000_000_000,     // 60 seconds
         "h" => 3_600_000_000_000,  // 3600 seconds
         "d" => 86_400_000_000_000, // 86400 seconds
@@ -199,7 +203,26 @@ mod tests {
     #[test]
     fn test_invalid_suffix() {
         assert!(parse_duration("30x").is_err());
-        assert!(parse_duration("30ms").is_err());
+        assert!(parse_duration("30ns").is_err());
+    }
+
+    #[test]
+    fn test_parse_milliseconds() {
+        assert_eq!(parse_duration("100ms").unwrap(), Duration::from_millis(100));
+        assert_eq!(
+            parse_duration("1.5ms").unwrap(),
+            Duration::from_micros(1500)
+        );
+        assert_eq!(parse_duration("100MS").unwrap(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_parse_microseconds() {
+        assert_eq!(parse_duration("500us").unwrap(), Duration::from_micros(500));
+        assert_eq!(parse_duration("1.5us").unwrap(), Duration::from_nanos(1500));
+        assert_eq!(parse_duration("500US").unwrap(), Duration::from_micros(500));
+        /* unicode micro sign U+00B5 */
+        assert_eq!(parse_duration("500µs").unwrap(), Duration::from_micros(500));
     }
 
     #[test]
