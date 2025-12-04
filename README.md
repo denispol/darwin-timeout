@@ -1,7 +1,7 @@
 darwin-timeout
 ==============
 
-GNU `timeout` for macOS—done right. Works through sleep. 83KB. Zero dependencies.
+GNU `timeout` for macOS, done right. Works through sleep. 83KB. Zero dependencies.
 
     brew install denispol/tap/darwin-timeout
 
@@ -34,6 +34,22 @@ Apple doesn't ship `timeout`. The alternatives have problems:
 - Also stops counting during sleep (uses `Instant`/`mach_absolute_time`)
 
 darwin-timeout uses `mach_continuous_time`, the only macOS clock that keeps ticking through sleep. Set 1 hour, get 1 hour—even if you close your laptop.
+
+**Scenario:** `timeout 1h ./build` with laptop sleeping 45min in the middle
+
+```
+             0        15min                 1h                    1h 45min
+             ├──────────┼───────────────────┼───────────────────────┤
+   Real time │▓▓▓▓▓▓▓▓▓▓│░░░░░░░░░░░░░░░░░░░│▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│
+             │  awake   │       sleep       │         awake         │
+             └──────────┴───────────────────┴───────────────────────┘
+
+darwin-timeout: ██████████░░░░░░░░░░░░░░░░░░░██ ← fires at 1h ✓
+                         (counts sleep)
+
+GNU timeout:    ██████████ ......paused...... ██████████████████████████████ ← fires at 1h 45min ✗
+                         (waits for awake time)
+```
 
 |                           | darwin-timeout | GNU coreutils |
 |---------------------------|----------------|---------------|
@@ -140,7 +156,7 @@ Time Modes
     timeout 1h ./build
     timeout -c wall 1h ./build           # explicit
 
-**active**: Only counts time when the system is awake. This matches GNU timeout behavior—useful for benchmarks or when you want the timer to pause during sleep.
+**active**: Only counts time when the system is awake. This matches GNU timeout behavior, useful for benchmarks or when you want the timer to pause during sleep.
 
     timeout -c active 1h ./benchmark     # pauses during sleep, like GNU timeout
 
@@ -236,7 +252,7 @@ Development
     cargo clippy                # lint
     ./scripts/benchmark.sh      # run benchmarks
 
-Library usage coming soon—core timeout logic will be available as a crate.
+Library usage coming soon; core timeout logic will be available as a crate.
 
 License
 -------
