@@ -54,44 +54,46 @@ jobs:
       - name: Create binaries
         run: |
           VERSION=${{ github.ref_name }}
-          mkdir -p dist
+          mkdir -p dist staging
           
           # ARM64 (Apple Silicon)
-          cp target/aarch64-apple-darwin/release/timeout dist/timeout
-          strip dist/timeout
-          codesign -s - dist/timeout
-          tar -C dist -czvf dist/timeout-${VERSION}-macos-arm64.tar.gz timeout
-          rm dist/timeout
+          cp target/aarch64-apple-darwin/release/timeout staging/timeout
+          strip staging/timeout
+          codesign -s - staging/timeout
+          cp -r completions staging/
+          tar -C staging -czvf dist/timeout-${VERSION}-macos-arm64.tar.gz timeout completions
+          rm staging/timeout
           
           # x86_64 (Intel)
-          cp target/x86_64-apple-darwin/release/timeout dist/timeout
-          strip dist/timeout
-          codesign -s - dist/timeout
-          tar -C dist -czvf dist/timeout-${VERSION}-macos-x86_64.tar.gz timeout
-          rm dist/timeout
+          cp target/x86_64-apple-darwin/release/timeout staging/timeout
+          strip staging/timeout
+          codesign -s - staging/timeout
+          tar -C staging -czvf dist/timeout-${VERSION}-macos-x86_64.tar.gz timeout completions
+          rm staging/timeout
           
-          # Universal
+          # Universal (also create unversioned for Homebrew)
           lipo -create \
             target/aarch64-apple-darwin/release/timeout \
             target/x86_64-apple-darwin/release/timeout \
-            -output dist/timeout
-          strip dist/timeout
-          codesign -s - dist/timeout
-          tar -C dist -czvf dist/timeout-${VERSION}-macos-universal.tar.gz timeout
-          rm dist/timeout
+            -output staging/timeout
+          strip staging/timeout
+          codesign -s - staging/timeout
+          tar -C staging -czvf dist/timeout-${VERSION}-macos-universal.tar.gz timeout completions
+          tar -C staging -czvf dist/timeout-macos-universal.tar.gz timeout completions
+          rm staging/timeout
           
           # Show results
           ls -lh dist/
 
       - name: Verify binaries
         run: |
-          for f in dist/*.tar.gz; do
+          for f in dist/timeout-${{ github.ref_name }}-*.tar.gz; do
             echo "=== $f ==="
             tar -tzf "$f"
             tar -xzf "$f" -C /tmp
             file /tmp/timeout
             /tmp/timeout --version
-            rm /tmp/timeout
+            rm -rf /tmp/timeout /tmp/completions
           done
 
       - name: Create Release
