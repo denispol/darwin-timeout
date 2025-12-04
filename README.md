@@ -205,6 +205,7 @@ Built on Darwin kernel primitives:
 - **posix_spawn**: lightweight process creation (faster than fork+exec)
 - **Signal forwarding**: SIGTERM/SIGINT/SIGHUP forwarded to child process group
 - **Process groups**: child runs in own group so signals reach all descendants
+- **kqueue + EVFILT_PROC + EVFILT_TIMER**: monitors process exit and timeout with nanosecond precision and zero CPU overhead
 
 83KB `no_std` binary. Custom allocator, direct syscalls, no libstd runtime.
 
