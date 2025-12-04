@@ -1,132 +1,89 @@
 darwin-timeout
 ==============
 
-Native macOS replacement for GNU `timeout`. Single `no_std` binary, **83KB**, zero dependencies.
+GNU `timeout` for macOS—done right. Works through sleep. 83KB. Zero dependencies.
 
-**You choose how time is measured.**
+    brew install denispol/tap/darwin-timeout
 
-GNU timeout measures *active* time: the clock pauses when your Mac sleeps. That's fine for benchmarks. But for real-world tasks (builds, backups, CI jobs), you probably want *wall-clock* time: set 1 hour, get 1 hour, regardless of sleep.
+Works exactly like GNU timeout:
 
-darwin-timeout gives you both:
+    timeout 30s ./slow-command           # kill after 30 seconds
+    timeout -k 5 1m ./stubborn           # SIGTERM, then SIGKILL after 5s
+    timeout --preserve-status 10s ./cmd  # exit with command's status
 
-```bash
-# Wall clock (default): 1 hour means 1 hour, even through sleep
-timeout 1h ./overnight-build
+Plus features GNU doesn't have:
 
-# Active time: pauses during sleep, like GNU timeout
-timeout -c active 1h ./benchmark
-```
+    timeout --json 5m ./test-suite       # JSON output for CI
+    timeout -c active 1h ./benchmark     # pause timer during sleep (GNU behavior)
+    timeout --on-timeout 'cleanup.sh' 30s ./task  # pre-timeout hook
 
-**100% GNU-compatible.** All flags work identically (`-s`, `-k`, `-p`, `-f`, `-v`). Scripts written for GNU timeout run unchanged. Plus extras: `--json`, `--quiet`, `--on-timeout`, `-c/--confine`.
-
-**185x smaller** than `brew install coreutils`. **20% faster startup**. Zero CPU while waiting (kqueue).
-
-Drop-in replacement that works correctly on Apple Silicon and Intel Macs.
+**Coming from GNU coreutils?** darwin-timeout defaults to wall-clock time (survives sleep). Use `-c active` for GNU-like behavior where the timer pauses during sleep.
 
 Why?
 ----
 
-Apple doesn't ship `timeout`. The usual answer is `brew install coreutils`, but:
+Apple doesn't ship `timeout`. The alternatives have problems:
 
-- Installs 15.7MB and 475 files just to get one command
-- **GNU timeout stops counting when your Mac sleeps** (uses `nanosleep` which pauses on sleep)
+**GNU coreutils** (`brew install coreutils`):
 
-This matters for real workloads:
-- CI server goes idle overnight → build timeouts don't fire
-- Close laptop during long test run → timeout clock freezes  
-- Docker container on sleeping Mac → hung processes never killed
+- 15.7MB and 475 files for one command
+- **Stops counting when your Mac sleeps** (uses `nanosleep`)
 
-darwin-timeout uses `mach_continuous_time`, the only macOS clock that keeps counting through sleep. Your 1-hour timeout means 1 hour of wall-clock time, period.
+**uutils** (Rust rewrite of coreutils):
+
+- Also stops counting during sleep (uses `Instant`/`mach_absolute_time`)
+
+darwin-timeout uses `mach_continuous_time`, the only macOS clock that keeps ticking through sleep. Set 1 hour, get 1 hour—even if you close your laptop.
 
 |                           | darwin-timeout | GNU coreutils |
 |---------------------------|----------------|---------------|
 | Works during system sleep | ✓              | ✗             |
-| Active-time-only mode     | ✓ (--confine)  | ✗             |
-| Zero CPU while waiting    | ✓ (kqueue)     | ✓ (nanosleep) |
-| Signal forwarding         | ✓              | ✓             |
-| Process group handling    | ✓              | ✓             |
-| JSON output for CI        | ✓              | ✗             |
-| Pre-timeout hook          | ✓              | ✗             |
-| Wait for file readiness   | ✓              | ✗             |
-| Custom exit code          | ✓              | ✗             |
-| Quiet mode                | ✓              | ✗             |
+| Active-time mode          | ✓              | ✗             |
+| JSON output               | ✓              | ✗             |
+| Pre-timeout hooks         | ✓              | ✗             |
+| Wait-for-file             | ✓              | ✗             |
+| Custom exit codes         | ✓              | ✗             |
 | Env var configuration     | ✓              | ✗             |
-| Shell completions         | ✓              | ✓             |
-| Single static binary      | ✓              | ✗             |
-| Install size              | 83KB           | 15.7MB (185x) |
-| Startup time              | 4ms            | 5ms           |
-| Dependencies              | none           | glibc, etc.   |
+| Binary size               | 83KB           | 15.7MB        |
+| Startup time              | 4.1ms          | 4.9ms         |
+| Zero CPU while waiting    | ✓ (kqueue)     | ✓ (nanosleep) |
 
-Performance
------------
-
-Identical timeout precision. 20% faster startup. Zero CPU while waiting. [Detailed benchmarks](#benchmarks).
-
-    # Timeout precision (50 runs, 10 warmup)
-    hyperfine './timeout 1s sleep 10' 'gtimeout 1s sleep 10'
-    
-    timeout  1.017s ± 0.003s
-    gtimeout 1.017s ± 0.003s
-
-    # Startup overhead (100 runs, 10 warmup)
-    hyperfine './timeout 1 true' 'gtimeout 1 true'
-    
-    timeout  4ms ± 0ms  (1.20x faster)
-    gtimeout 5ms ± 1ms
-
-    # CPU during 2s wait
-    /usr/bin/time -l ./timeout 2 sleep 60
-    
-    0.00 user, 0.00 sys  (kqueue blocks, no polling)
+100% GNU-compatible. All flags work identically (`-s`, `-k`, `-p`, `-f`, `-v`). Drop-in replacement for Apple Silicon and Intel Macs.
 
 Install
 -------
 
-Requires macOS 10.12+ and Rust 1.90+ (build only).
+**Homebrew** (recommended):
+
+    brew install denispol/tap/darwin-timeout
+
+**From releases:** Download the universal binary from [releases](https://github.com/denispol/darwin-timeout/releases).
 
 **From source:**
 
     cargo build --release
     sudo cp target/release/timeout /usr/local/bin/
 
-**Universal binary (ARM64 + x86_64):**
-
-    ./scripts/build-universal.sh
-    sudo cp target/universal/timeout /usr/local/bin/
-
-Requires both targets: `rustup target add aarch64-apple-darwin x86_64-apple-darwin`
-
-**Shell completions:**
-
-    # zsh
-    mkdir -p ~/.zsh/completions
-    cp completions/timeout.zsh ~/.zsh/completions/_timeout
-    # add to .zshrc: fpath=(~/.zsh/completions $fpath)
-
-    # bash
-    sudo cp completions/timeout.bash /etc/bash_completion.d/timeout
-
-    # fish
-    cp completions/timeout.fish ~/.config/fish/completions/
+Shell completions are installed automatically with Homebrew. For manual install, see [completions/](completions/).
 
 Quick Start
 -----------
 
-    timeout 30 ./slow-command           # Kill after 30 seconds
+    timeout 30 ./slow-command           # kill after 30 seconds
     timeout -k 5 30 ./stubborn          # SIGTERM, then SIGKILL after 5s
     timeout --json 1m ./build           # JSON output for CI
-    timeout -v 10 ./script              # Verbose, shows signals sent
+    timeout -v 10 ./script              # verbose: shows signals sent
 
 Use Cases
 ---------
 
-**CI/CD**: Stop flaky tests before they hang your entire build.
+**CI/CD**: Stop flaky tests before they hang your pipeline.
 
     timeout --json 5m ./run-tests
 
-**Build systems**: Catch infinite loops in code generation.
+**Overnight builds**: Timeouts that work even when your Mac sleeps.
 
-    timeout 30m make all
+    timeout 2h make release             # 2 hours wall-clock, guaranteed
 
 **Network ops**: Don't wait forever for unresponsive servers.
 
@@ -136,47 +93,63 @@ Use Cases
 
     timeout -k 10s 60s ./cleanup.sh
 
-Examples
---------
+**Coordinated startup**: Wait for dependencies before running.
 
-Command completes:
+    timeout --wait-for-file /tmp/db-ready 5m ./migrate
 
-    $ timeout 5s sleep 1
-    $ echo $?
-    0
+Options
+-------
 
-Command times out (exit 124):
+    timeout [OPTIONS] DURATION COMMAND [ARGS...]
 
-    $ timeout 1s sleep 10
-    $ echo $?
-    124
+**GNU-compatible flags:**
 
-Fractional seconds, minutes, hours, days:
+    -s, --signal SIG         signal to send (default: TERM)
+    -k, --kill-after T       send SIGKILL if still running after T
+    -v, --verbose            print signals to stderr
+    -p, --preserve-status    exit with command's status, not 124
+    -f, --foreground         don't create process group
 
-    timeout 0.5s sleep 10
-    timeout 30m ./batch-job
-    timeout 2h ./long-task
+**darwin-timeout extensions:**
 
-SIGKILL if SIGTERM ignored:
+    -q, --quiet              suppress error messages
+    -c, --confine MODE       time mode: 'wall' (default) or 'active'
+    --json                   JSON output for scripting
+    --on-timeout CMD         run CMD on timeout (before kill); %p = child PID
+    --on-timeout-limit T     time limit for --on-timeout (default: 5s)
+    --timeout-exit-code N    exit with N instead of 124 on timeout
+    --wait-for-file PATH     wait for file to exist before starting command
+    --wait-for-file-timeout T  timeout for --wait-for-file (default: wait forever)
 
-    timeout -k 5s 30s ./ignores-sigterm
+**Duration format:** number with optional suffix `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Fractional values supported: `0.5s`, `1.5m`.
 
-Verbose:
+**Exit codes:**
 
-    $ timeout -v 1s sleep 10
-    timeout: sending signal SIGTERM to command
+    0       command completed successfully
+    124     timed out (or custom via --timeout-exit-code)
+    125     timeout itself failed
+    126     command found but not executable
+    127     command not found
+    128+N   command killed by signal N
 
-Custom signal:
+Time Modes
+----------
 
-    timeout -s HUP 5s ./daemon
+**wall** (default): Real elapsed time, including system sleep. A 1-hour timeout fires after 1 hour of wall-clock time, even if your Mac sleeps for 45 minutes.
 
-Preserve command's exit status:
+    timeout 1h ./build
+    timeout -c wall 1h ./build           # explicit
 
-    $ timeout --preserve-status 1s sleep 10
-    $ echo $?
-    143
+**active**: Only counts time when the system is awake. This matches GNU timeout behavior—useful for benchmarks or when you want the timer to pause during sleep.
 
-JSON for CI:
+    timeout -c active 1h ./benchmark     # pauses during sleep, like GNU timeout
+
+Under the hood: `wall` uses `mach_continuous_time`, `active` uses `CLOCK_MONOTONIC_RAW`.
+
+JSON Output
+-----------
+
+Machine-readable output for CI/CD pipelines and automation:
 
     $ timeout --json 1s sleep 0.5
     {"schema_version":2,"status":"completed","exit_code":0,"elapsed_ms":504}
@@ -184,240 +157,85 @@ JSON for CI:
     $ timeout --json 0.5s sleep 10
     {"schema_version":2,"status":"timeout","signal":"SIGTERM","signal_num":15,"killed":false,"command_exit_code":-1,"exit_code":124,"elapsed_ms":502}
 
-Quiet mode:
+**Status types:** `completed`, `timeout`, `signal_forwarded`, `error`
 
-    $ timeout -q 1s nonexistent-command
-    $ echo $?
-    127
+**Fields by status:**
 
-Custom exit code on timeout:
-
-    $ timeout --timeout-exit-code 42 1s sleep 10
-    $ echo $?
-    42
-
-Run cleanup on timeout:
-
-    timeout --on-timeout 'echo timed out >> /tmp/log' 5s ./long-task
-
-Environment variable for duration:
-
-    TIMEOUT=30s timeout ./my-command
-
-Wait for file before starting:
-
-    timeout --wait-for-file /tmp/ready.txt 5m ./process-data
-    timeout --wait-for-file /tmp/ready --wait-for-file-timeout 30s 5m ./task
-
-Options
--------
-
-    -s, --signal SIG         Signal to send (default: TERM)
-    -k, --kill-after T       Send SIGKILL if still running after T
-    -f, --foreground         Don't create process group
-    -p, --preserve-status    Exit with command's status, not 124
-    -v, --verbose            Print signals to stderr
-    -q, --quiet              Suppress error messages (mutually exclusive with -v)
-    -c, --confine MODE       Time mode: 'wall' (default) or 'active'
-    --timeout-exit-code N    Exit with N instead of 124 on timeout
-    --on-timeout CMD         Run CMD on timeout (before kill); %p = child PID
-    --on-timeout-limit T     Time limit for --on-timeout (default: 5s)
-    --wait-for-file PATH     Wait for file to exist before starting command
-    --wait-for-file-timeout T  Timeout for --wait-for-file (default: wait forever)
-    --json                   JSON output for scripting
-
-### Time Confinement Modes (-c, --confine)
-
-**wall** (default): Total elapsed time including system sleep. A 1-hour timeout fires after 1 hour of wall-clock time, even if you close your laptop for 45 minutes.
-
-**active**: Only counts time when the system is awake. Useful for benchmarks where you want to measure actual CPU availability, not idle time. ~28% faster internally (uses `CLOCK_MONOTONIC_RAW`).
-
-```bash
-# Default: fire after 1 hour wall-clock time
-timeout 1h ./build
-
-# Explicit wall time (same as default)
-timeout -c wall 1h ./build
-
-# Active time only: if system sleeps for 30min, timeout extends by 30min
-timeout -c active 1h ./benchmark
-```
+| Field             | completed | timeout | signal_forwarded | error |
+|-------------------|:---------:|:-------:|:----------------:|:-----:|
+| schema_version    | ✓         | ✓       | ✓                | ✓     |
+| status            | ✓         | ✓       | ✓                | ✓     |
+| exit_code         | ✓         | ✓       | ✓                | ✓     |
+| elapsed_ms        | ✓         | ✓       | ✓                | ✓     |
+| signal            |           | ✓       | ✓                |       |
+| signal_num        |           | ✓       | ✓                |       |
+| killed            |           | ✓       |                  |       |
+| command_exit_code |           | ✓       | ✓                |       |
+| error             |           |         |                  | ✓     |
 
 Environment Variables
 ---------------------
 
-    TIMEOUT                       Default duration (used if CLI arg isn't a valid duration)
-    TIMEOUT_SIGNAL                Default signal (overridden by -s/--signal)
-    TIMEOUT_KILL_AFTER            Default kill-after (overridden by -k/--kill-after)
-    TIMEOUT_WAIT_FOR_FILE         Default file to wait for
-    TIMEOUT_WAIT_FOR_FILE_TIMEOUT Timeout for wait-for-file
+Configure defaults without CLI flags:
 
-Duration Format
----------------
+    TIMEOUT                       default duration if CLI arg isn't a valid duration
+    TIMEOUT_SIGNAL                default signal (overridden by -s)
+    TIMEOUT_KILL_AFTER            default kill-after (overridden by -k)
+    TIMEOUT_WAIT_FOR_FILE         default file to wait for
+    TIMEOUT_WAIT_FOR_FILE_TIMEOUT timeout for wait-for-file
 
-Number with optional suffix: `s` (seconds, default), `m` (minutes), `h` (hours), `d` (days).
-Case-insensitive. `0` disables timeout.
+Pre-timeout Hooks
+-----------------
 
-Exit Codes
-----------
+Run a command when timeout fires, before sending the signal:
 
-    0       Command completed
-    124     Timed out
-    125     Timeout failed
-    126     Command not executable
-    127     Command not found
-    128+N   Killed by signal N
+    timeout --on-timeout 'echo "killing $p" >> /tmp/log' 5s ./long-task
+    timeout --on-timeout 'kill -QUIT %p' --on-timeout-limit 2s 30s ./server
 
-JSON Schema
------------
-
-With `--json`, output is a single JSON object with `schema_version` (currently `2`).
-
-**Status types:**
-
-- `completed`: Command finished before timeout
-- `timeout`: Command was killed due to timeout
-- `signal_forwarded`: Timeout received a signal and forwarded it
-- `error`: Timeout itself failed
-
-**Fields by status:**
-
-| Field | Type | completed | timeout | signal_forwarded | error |
-|-------|------|:---------:|:-------:|:----------------:|:-----:|
-| schema_version | number | ✓ | ✓ | ✓ | ✓ |
-| status | string | ✓ | ✓ | ✓ | ✓ |
-| exit_code | number | ✓ | ✓ | ✓ | ✓ |
-| elapsed_ms | number | ✓ | ✓ | ✓ | ✓ |
-| signal | string | | ✓ | ✓ | |
-| signal_num | number | | ✓ | ✓ | |
-| killed | boolean | | ✓ | | |
-| command_exit_code | number | | ✓ | ✓ | |
-| hook_* | various | | ✓* | | |
-| error | string | | | | ✓ |
-
-*hook fields present only when `--on-timeout` is configured.
+`%p` is replaced with the child PID. Hooks have their own timeout (default 5s).
 
 How It Works
 ------------
 
-Built on Darwin kernel APIs:
+Built on Darwin kernel primitives:
 
-**kqueue**: Monitors process exit (EVFILT_PROC) and timeout (EVFILT_TIMER with NOTE_NSECONDS). No polling.
+- **kqueue + EVFILT_PROC + EVFILT_TIMER**: monitors process exit and timeout with zero CPU overhead
+- **mach_continuous_time**: wall-clock that survives system sleep (the key differentiator)
+- **CLOCK_MONOTONIC_RAW**: active-time clock, pauses during sleep
+- **posix_spawn**: lightweight process creation (faster than fork+exec)
+- **Signal forwarding**: SIGTERM/SIGINT/SIGHUP forwarded to child process group
+- **Process groups**: child runs in own group so signals reach all descendants
 
-**mach_continuous_time**: Wall-clock timing that survives system sleep. Used for `--confine=wall` (default). This is the key differentiator from GNU timeout.
-
-**clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)**: Active-time-only clock, pauses during sleep. Used for `--confine=active`. ~28% faster (no timebase conversion needed).
-
-**Signal forwarding**: SIGTERM/SIGINT/SIGHUP to timeout get forwarded to child. No orphans on Ctrl-C.
-
-**Process groups**: Child runs in its own group so signals reach all descendants. `--foreground` disables this.
-
-**no_std binary**: Custom allocator, direct syscalls, no libstd runtime. That's why it's 83KB instead of 500KB.
-
-Testing
--------
-
-    cargo test
-    cargo clippy
-    ./scripts/benchmark.sh
+83KB `no_std` binary. Custom allocator, direct syscalls, no libstd runtime.
 
 Benchmarks
 ----------
 
-All benchmarks run on Apple M3 Pro, macOS 15.1, Rust 1.90.0, hyperfine 1.18.0.
-Compared against GNU coreutils 9.5 (`gtimeout` via Homebrew).
+All benchmarks on Apple M3 Pro, macOS 15.1, hyperfine 1.18.0.
 
-**Binary size**
+    # Binary size
+    darwin-timeout: 83KB
+    GNU coreutils:  15.7MB (185x larger)
 
-    $ ls -l target/release/timeout
-    -rwxr-xr-x  1 user  staff  85184  timeout
-    
-    83KB (no_std, stripped, lto=fat, opt-level=z)
+    # Startup overhead (100 runs)
+    darwin-timeout: 4.1ms ± 0.4ms
+    GNU timeout:    4.9ms ± 0.7ms (20% slower)
 
-**Test 1: Startup overhead**
+    # Timeout precision (50 runs, 1s timeout)
+    darwin-timeout: 1.017s ± 0.003s
+    GNU timeout:    1.017s ± 0.003s (identical)
 
-100 runs, 10 warmup. Measures time to spawn, run `true`, and exit.
+    # CPU while waiting
+    darwin-timeout: 0.00 user, 0.00 sys (kqueue blocks)
 
-    $ hyperfine --warmup 10 -N --runs 100 './timeout 1 true' 'gtimeout 1 true'
-    
-    Benchmark 1: ./timeout 1 true
-      Time (mean ± σ):       4.1 ms ±   0.4 ms
-      Range (min … max):     3.4 ms …   5.1 ms
-    
-    Benchmark 2: gtimeout 1 true
-      Time (mean ± σ):       4.9 ms ±   0.7 ms  
-      Range (min … max):     4.0 ms …   7.2 ms
-    
-    Summary: timeout ran 1.20 ± 0.21 times faster than gtimeout
+Development
+-----------
 
-**Test 2: 1s timeout precision**
+    cargo test                  # run tests
+    cargo clippy                # lint
+    ./scripts/benchmark.sh      # run benchmarks
 
-50 runs, 10 warmup. Target: 1000ms.
-
-    $ hyperfine --warmup 10 -N --runs 50 -i './timeout 1s sleep 10' 'gtimeout 1s sleep 10'
-    
-    Benchmark 1: ./timeout 1s sleep 10
-      Time (mean ± σ):      1.017 s ±  0.003 s
-      Range (min … max):    1.010 s …  1.022 s
-    
-    Benchmark 2: gtimeout 1s sleep 10
-      Time (mean ± σ):      1.017 s ±  0.003 s
-      Range (min … max):    1.010 s …  1.021 s
-    
-    Summary: identical (1.00 ± 0.00)
-
-**Test 3: 100ms timeout precision**
-
-30 runs, 5 warmup. Target: 100ms.
-
-    $ hyperfine --warmup 5 -N --runs 30 -i './timeout 0.1 sleep 10' 'gtimeout 0.1 sleep 10'
-    
-    Benchmark 1: ./timeout 0.1 sleep 10
-      Time (mean ± σ):     114.6 ms ±   2.8 ms
-      Range (min … max):   109.5 ms … 119.5 ms
-    
-    Benchmark 2: gtimeout 0.1 sleep 10
-      Time (mean ± σ):     115.7 ms ±   2.3 ms
-      Range (min … max):   110.3 ms … 120.0 ms
-    
-    Summary: timeout ran 1.01 ± 0.03 times faster
-    Note: ~15ms overhead is macOS kernel scheduling floor.
-
-**Test 4: Kill-after escalation**
-
-10 runs, 3 warmup. 200ms timeout + 200ms kill-after = target 400ms.
-
-    $ hyperfine --warmup 3 -N --runs 10 -i "./timeout -k 0.2 0.2 bash -c 'trap \"\" TERM; sleep 60'"
-    
-    Benchmark 1: ./timeout -k 0.2 0.2 bash -c 'trap "" TERM; sleep 60'
-      Time (mean ± σ):     421.0 ms ±   2.8 ms
-      Range (min … max):   416.1 ms … 424.4 ms
-    
-    ~21ms overhead (5%) for signal delivery and process reaping.
-
-**Test 5: CPU usage during wait**
-
-2-second wait, measuring user/sys time.
-
-    $ /usr/bin/time -l ./timeout 2 sleep 60
-    
-            2.00 real         0.00 user         0.00 sys
-    
-    Zero CPU — kqueue blocks until event fires.
-
-**Test 6: Fast command latency**
-
-100 runs, 10 warmup. Overhead of timeout wrapper on fast commands.
-
-    $ hyperfine --warmup 10 -N --runs 100 'echo hello' './timeout 60 echo hello'
-    
-    Benchmark 1: echo hello
-      Time (mean ± σ):       1.4 ms ±   0.2 ms
-    
-    Benchmark 2: ./timeout 60 echo hello  
-      Time (mean ± σ):       3.7 ms ±   0.3 ms
-    
-    ~2.3ms overhead for process spawning and kqueue setup.
+Library usage coming soon—core timeout logic will be available as a crate.
 
 License
 -------
