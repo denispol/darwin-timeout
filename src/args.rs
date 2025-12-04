@@ -568,7 +568,7 @@ fn print_help() {
 Enforce a strict wall-clock deadline on a command (sleep-aware).
 
 Arguments:
-  DURATION  Time before sending signal (30, 30s, 1.5m, 2h, 1d)
+  DURATION  Time before sending signal (30, 30s, 100ms, 500us, 1.5m, 2h, 1d)
   COMMAND   Command to run
   ARG       Arguments for the command
 
