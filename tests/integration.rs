@@ -1495,28 +1495,52 @@ fn test_quiet_verbose_conflict() {
 #[test]
 fn test_json_schema_version() {
     /*
-     * All JSON output should include schema_version field
+     * All JSON output should include schema_version field (version 3 with rusage fields)
      */
     /* Test completed */
     timeout_cmd()
         .args(["--json", "5s", "true"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""schema_version":2"#));
+        .stdout(predicate::str::contains(r#""schema_version":3"#));
 
     /* Test timeout */
     timeout_cmd()
         .args(["--json", "0.1s", "sleep", "10"])
         .assert()
         .code(124)
-        .stdout(predicate::str::contains(r#""schema_version":2"#));
+        .stdout(predicate::str::contains(r#""schema_version":3"#));
 
     /* Test error */
     timeout_cmd()
         .args(["--json", "5s", "nonexistent_command_xyz_12345"])
         .assert()
         .code(127)
-        .stdout(predicate::str::contains(r#""schema_version":2"#));
+        .stdout(predicate::str::contains(r#""schema_version":3"#));
+}
+
+#[test]
+fn test_json_rusage_fields() {
+    /*
+     * JSON output should include resource usage fields (user_time_ms, system_time_ms, max_rss_kb)
+     */
+    /* Test completed - should have all rusage fields */
+    timeout_cmd()
+        .args(["--json", "5s", "true"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""user_time_ms":"#))
+        .stdout(predicate::str::contains(r#""system_time_ms":"#))
+        .stdout(predicate::str::contains(r#""max_rss_kb":"#));
+
+    /* Test timeout - should also have rusage fields */
+    timeout_cmd()
+        .args(["--json", "0.1s", "sleep", "10"])
+        .assert()
+        .code(124)
+        .stdout(predicate::str::contains(r#""user_time_ms":"#))
+        .stdout(predicate::str::contains(r#""system_time_ms":"#))
+        .stdout(predicate::str::contains(r#""max_rss_kb":"#));
 }
 
 #[test]
@@ -1711,6 +1735,58 @@ fn test_signal_forwarding_reports_correct_signal() {
         stderr.contains("SIGINT"),
         "verbose output should report SIGINT, got: {}",
         stderr
+    );
+}
+
+#[test]
+fn test_signal_forwarded_json_rusage() {
+    /*
+     * When signal is forwarded, JSON output should include rusage fields
+     */
+    use std::process::{Command, Stdio};
+    use std::thread;
+
+    let timeout_process = Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["--json", "30s", "sleep", "100"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to start timeout");
+
+    let pid = timeout_process.id() as i32;
+    /* give time for timeout to spawn child and set up signal handlers */
+    thread::sleep(Duration::from_millis(300));
+
+    /* Send SIGTERM to trigger signal forwarding */
+    // SAFETY: kill() is safe with any valid pid/signal combo
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+
+    let output = timeout_process.wait_with_output().expect("Failed to wait");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    /* Should have signal_forwarded status with rusage fields */
+    assert!(
+        stdout.contains(r#""status":"signal_forwarded""#),
+        "should report signal_forwarded status, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""user_time_ms":"#),
+        "should include user_time_ms, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""system_time_ms":"#),
+        "should include system_time_ms, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""max_rss_kb":"#),
+        "should include max_rss_kb, got: {}",
+        stdout
     );
 }
 
