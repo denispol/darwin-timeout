@@ -156,6 +156,34 @@ pub struct RawExitStatus {
     status: i32,
 }
 
+/// Resource usage from wait4() - CPU time and memory.
+/// macOS returns ru_maxrss in bytes (not KB like Linux), we convert to KB.
+///
+/// **Precision notes:**
+/// - Time values stored in microseconds internally, converted to milliseconds via truncation
+///   (not rounding) in `user_time_ms()`/`system_time_ms()` to avoid float bloat.
+/// - RSS is truncated to KB (up to 1023 bytes lost per conversion).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResourceUsage {
+    pub user_time_us: u64,   /* ru_utime in microseconds */
+    pub system_time_us: u64, /* ru_stime in microseconds */
+    pub max_rss_kb: u64,     /* ru_maxrss converted to KB (macOS reports bytes) */
+}
+
+impl ResourceUsage {
+    /// User CPU time in milliseconds (truncated, not rounded)
+    #[inline]
+    pub fn user_time_ms(&self) -> u64 {
+        self.user_time_us / 1000
+    }
+
+    /// System CPU time in milliseconds (truncated, not rounded)
+    #[inline]
+    pub fn system_time_ms(&self) -> u64 {
+        self.system_time_us / 1000
+    }
+}
+
 impl RawExitStatus {
     /// Returns the exit code if the process exited normally
     #[inline]
@@ -222,33 +250,37 @@ impl RawChild {
         self.pid as u32
     }
 
-    /// Wait for the process to exit, blocking
-    pub fn wait(&mut self) -> Result<RawExitStatus, SpawnError> {
+    /// Wait for the process to exit, blocking. Returns exit status and resource usage.
+    pub fn wait(&mut self) -> Result<(RawExitStatus, ResourceUsage), SpawnError> {
         if self.exited {
             return Err(SpawnError::Wait(0));
         }
 
         let mut status: i32 = 0;
-        // SAFETY: pid is valid from spawn, status is valid pointer
-        let ret = unsafe { libc::waitpid(self.pid, &mut status, 0) };
+        // SAFETY: libc::rusage is a C struct that's safe to zero-initialize
+        let mut rusage: libc::rusage = unsafe { core::mem::zeroed() };
+        // SAFETY: pid is valid from spawn, status and rusage are valid pointers
+        let ret = unsafe { libc::wait4(self.pid, &mut status, 0, &mut rusage) };
 
         if ret < 0 {
             return Err(SpawnError::Wait(errno()));
         }
 
         self.exited = true;
-        Ok(RawExitStatus { status })
+        Ok((RawExitStatus { status }, rusage_to_resource_usage(&rusage)))
     }
 
-    /// Check if process has exited without blocking
-    pub fn try_wait(&mut self) -> Result<Option<RawExitStatus>, SpawnError> {
+    /// Check if process has exited without blocking. Returns exit status and resource usage if exited.
+    pub fn try_wait(&mut self) -> Result<Option<(RawExitStatus, ResourceUsage)>, SpawnError> {
         if self.exited {
             return Ok(None);
         }
 
         let mut status: i32 = 0;
-        // SAFETY: pid is valid from spawn, status is valid pointer
-        let ret = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };
+        // SAFETY: libc::rusage is a C struct that's safe to zero-initialize
+        let mut rusage: libc::rusage = unsafe { core::mem::zeroed() };
+        // SAFETY: pid is valid from spawn, status and rusage are valid pointers
+        let ret = unsafe { libc::wait4(self.pid, &mut status, libc::WNOHANG, &mut rusage) };
 
         if ret < 0 {
             return Err(SpawnError::Wait(errno()));
@@ -260,7 +292,10 @@ impl RawChild {
         }
 
         self.exited = true;
-        Ok(Some(RawExitStatus { status }))
+        Ok(Some((
+            RawExitStatus { status },
+            rusage_to_resource_usage(&rusage),
+        )))
     }
 
     /// Send SIGKILL to the process
@@ -373,6 +408,29 @@ fn errno() -> i32 {
     }
 }
 
+/* convert libc::rusage to ResourceUsage. macOS reports ru_maxrss in bytes, divide by 1024 for KB. */
+#[inline]
+#[allow(clippy::cast_sign_loss)]
+fn rusage_to_resource_usage(rusage: &libc::rusage) -> ResourceUsage {
+    /* timeval: tv_sec (seconds) + tv_usec (microseconds)
+     * tv_usec is i32 on macOS - use .max(0) to guard against negative values
+     * before casting to u64 (negative i32 -> huge u64 via two's complement) */
+    let user_time_us = (rusage.ru_utime.tv_sec.max(0) as u64)
+        .saturating_mul(1_000_000)
+        .saturating_add(rusage.ru_utime.tv_usec.max(0) as u64);
+    let system_time_us = (rusage.ru_stime.tv_sec.max(0) as u64)
+        .saturating_mul(1_000_000)
+        .saturating_add(rusage.ru_stime.tv_usec.max(0) as u64);
+    /* macOS: ru_maxrss is in bytes (i64), convert to KB. guard against negative. */
+    let max_rss_kb = (rusage.ru_maxrss.max(0) as u64) / 1024;
+
+    ResourceUsage {
+        user_time_us,
+        system_time_us,
+        max_rss_kb,
+    }
+}
+
 /*
  * Tests for process spawning.
  *
@@ -389,16 +447,48 @@ mod tests {
     use alloc::vec;
 
     #[test]
+    fn test_resource_usage_accessors() {
+        /* test truncation behavior (not rounding) */
+        let rusage = ResourceUsage {
+            user_time_us: 1999,   /* 1.999ms -> 1ms truncated */
+            system_time_us: 2500, /* 2.5ms -> 2ms truncated */
+            max_rss_kb: 1024,
+        };
+        assert_eq!(rusage.user_time_ms(), 1);
+        assert_eq!(rusage.system_time_ms(), 2);
+        assert_eq!(rusage.max_rss_kb, 1024);
+
+        /* edge case: sub-millisecond truncates to 0 */
+        let tiny = ResourceUsage {
+            user_time_us: 999,
+            system_time_us: 1,
+            max_rss_kb: 0,
+        };
+        assert_eq!(tiny.user_time_ms(), 0);
+        assert_eq!(tiny.system_time_ms(), 0);
+    }
+
+    #[test]
+    fn test_resource_usage_default() {
+        let rusage = ResourceUsage::default();
+        assert_eq!(rusage.user_time_us, 0);
+        assert_eq!(rusage.system_time_us, 0);
+        assert_eq!(rusage.max_rss_kb, 0);
+    }
+
+    #[test]
     fn test_spawn_true() {
         let mut child = spawn_command("true", &[], false).unwrap();
-        let status = child.wait().unwrap();
+        let (status, rusage) = child.wait().unwrap();
         assert_eq!(status.code(), Some(0));
+        /* rusage should have some values (at least max_rss > 0 for any process) */
+        assert!(rusage.max_rss_kb > 0);
     }
 
     #[test]
     fn test_spawn_false() {
         let mut child = spawn_command("false", &[], false).unwrap();
-        let status = child.wait().unwrap();
+        let (status, _rusage) = child.wait().unwrap();
         assert_eq!(status.code(), Some(1));
     }
 
@@ -412,7 +502,7 @@ mod tests {
     fn test_spawn_with_args() {
         let args = vec![String::from("hello")];
         let mut child = spawn_command("echo", &args, false).unwrap();
-        let status = child.wait().unwrap();
+        let (status, _rusage) = child.wait().unwrap();
         assert_eq!(status.code(), Some(0));
     }
 

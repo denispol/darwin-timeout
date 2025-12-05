@@ -48,6 +48,7 @@ pub mod wait;
 pub use args::Args;
 pub use duration::{is_no_timeout, parse_duration};
 pub use error::{Result, TimeoutError, exit_codes};
+pub use process::ResourceUsage;
 pub use runner::{
     HookResult, RunConfig, RunResult, cleanup_signal_forwarding, run_command,
     setup_signal_forwarding,

@@ -168,26 +168,16 @@ JSON Output
 Machine-readable output for CI/CD pipelines and automation:
 
     $ timeout --json 1s sleep 0.5
-    {"schema_version":2,"status":"completed","exit_code":0,"elapsed_ms":504}
+    {"schema_version":3,"status":"completed","exit_code":0,"elapsed_ms":504,"user_time_ms":1,"system_time_ms":2,"max_rss_kb":1248}
 
     $ timeout --json 0.5s sleep 10
-    {"schema_version":2,"status":"timeout","signal":"SIGTERM","signal_num":15,"killed":false,"command_exit_code":-1,"exit_code":124,"elapsed_ms":502}
+    {"schema_version":3,"status":"timeout","signal":"SIGTERM","signal_num":15,"killed":false,"command_exit_code":-1,"exit_code":124,"elapsed_ms":502,"user_time_ms":0,"system_time_ms":1,"max_rss_kb":1232}
 
 **Status types:** `completed`, `timeout`, `signal_forwarded`, `error`
 
-**Fields by status:**
+Includes resource usage metrics: CPU time (`user_time_ms`, `system_time_ms`) and peak memory (`max_rss_kb`).
 
-| Field             | completed | timeout | signal_forwarded | error |
-|-------------------|:---------:|:-------:|:----------------:|:-----:|
-| schema_version    | ✓         | ✓       | ✓                | ✓     |
-| status            | ✓         | ✓       | ✓                | ✓     |
-| exit_code         | ✓         | ✓       | ✓                | ✓     |
-| elapsed_ms        | ✓         | ✓       | ✓                | ✓     |
-| signal            |           | ✓       | ✓                |       |
-| signal_num        |           | ✓       | ✓                |       |
-| killed            |           | ✓       |                  |       |
-| command_exit_code |           | ✓       | ✓                |       |
-| error             |           |         |                  | ✓     |
+See [docs/json-output.md](docs/json-output.md) for complete schema documentation, field reference, and integration examples.
 
 Environment Variables
 ---------------------
@@ -221,14 +211,13 @@ Built on Darwin kernel primitives:
 - **posix_spawn**: lightweight process creation (faster than fork+exec)
 - **Signal forwarding**: SIGTERM/SIGINT/SIGHUP forwarded to child process group
 - **Process groups**: child runs in own group so signals reach all descendants
-- **kqueue + EVFILT_PROC + EVFILT_TIMER**: monitors process exit and timeout with nanosecond precision and zero CPU overhead
 
 83KB `no_std` binary. Custom allocator, direct syscalls, no libstd runtime.
 
 Benchmarks
 ----------
 
-All benchmarks on Apple M3 Pro, macOS 15.1, hyperfine 1.18.0.
+All benchmarks on Apple M4 Pro, macOS Tahoe 26.2, hyperfine 1.20.0.
 
     # Binary size
     darwin-timeout: 83KB

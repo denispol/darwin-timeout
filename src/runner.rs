@@ -27,7 +27,7 @@ use core::time::Duration;
 use crate::args::{Confine, OwnedArgs};
 use crate::duration::{is_no_timeout, parse_duration};
 use crate::error::{Result, TimeoutError, exit_codes};
-use crate::process::{RawChild, RawExitStatus, SpawnError, spawn_command};
+use crate::process::{RawChild, RawExitStatus, ResourceUsage, SpawnError, spawn_command};
 use crate::signal::{Signal, parse_signal, signal_name, signal_number};
 use crate::sync::AtomicOnce;
 
@@ -334,17 +334,22 @@ pub struct HookResult {
 /* what happened when we ran the command */
 #[derive(Debug)]
 pub enum RunResult {
-    Completed(RawExitStatus),
+    Completed {
+        status: RawExitStatus,
+        rusage: ResourceUsage,
+    },
     TimedOut {
         signal: Signal,
         killed: bool, /* true if we had to escalate to SIGKILL */
         status: Option<RawExitStatus>,
+        rusage: Option<ResourceUsage>,
         hook: Option<HookResult>, /* on-timeout hook result if configured */
     },
     SignalForwarded {
         /* we got SIGTERM/SIGINT/SIGHUP, passed it on */
         signal: Signal,
         status: Option<RawExitStatus>,
+        rusage: Option<ResourceUsage>,
     },
 }
 
@@ -353,12 +358,13 @@ impl RunResult {
     #[must_use]
     pub fn exit_code(&self, preserve_status: bool, timeout_exit_code: u8) -> u8 {
         match self {
-            Self::Completed(status) => status_to_exit_code(status),
+            Self::Completed { status, .. } => status_to_exit_code(status),
             Self::TimedOut {
                 signal,
                 killed,
                 status,
                 hook: _,
+                rusage: _,
             } => {
                 if preserve_status {
                     status.map_or_else(
@@ -372,10 +378,20 @@ impl RunResult {
                     timeout_exit_code
                 }
             }
-            Self::SignalForwarded { signal, status } => {
+            Self::SignalForwarded { signal, status, .. } => {
                 /* We got killed by a signal - return 128 + signum like the child would */
                 status.map_or_else(|| signal_exit_code(*signal), |s| status_to_exit_code(&s))
             }
+        }
+    }
+
+    /* get resource usage if available */
+    #[must_use]
+    pub fn resource_usage(&self) -> Option<&ResourceUsage> {
+        match self {
+            Self::Completed { rusage, .. } => Some(rusage),
+            Self::TimedOut { rusage, .. } => rusage.as_ref(),
+            Self::SignalForwarded { rusage, .. } => rusage.as_ref(),
         }
     }
 }
@@ -464,11 +480,11 @@ pub fn run_command(command: &str, args: &[String], config: &RunConfig) -> Result
 
     /* zero timeout = run forever */
     if is_no_timeout(&config.timeout) {
-        let status = child.wait().map_err(|e| match e {
+        let (status, rusage) = child.wait().map_err(|e| match e {
             SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
             _ => TimeoutError::Internal("wait failed".to_string()),
         })?;
-        return Ok(RunResult::Completed(status));
+        return Ok(RunResult::Completed { status, rusage });
     }
 
     monitor_with_timeout(&mut child, config)
@@ -486,8 +502,8 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
     let exit_result = wait_with_kqueue(child, pid, config.timeout, config.confine)?;
 
     match exit_result {
-        WaitResult::Exited(status) => {
-            return Ok(RunResult::Completed(status));
+        WaitResult::Exited(status, rusage) => {
+            return Ok(RunResult::Completed { status, rusage });
         }
         WaitResult::ReceivedSignal(sig) => {
             /* We received SIGTERM/SIGINT/SIGHUP - forward to child and exit */
@@ -495,10 +511,15 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
                 crate::eprintln!("timeout: forwarding signal {} to command", signal_name(sig));
             }
             send_signal(pid, sig, config.foreground)?;
-            let status = child.wait().ok();
+            /* wait for child - extract rusage even if wait returns error (child exited) */
+            let (status, rusage) = match child.wait() {
+                Ok((s, r)) => (Some(s), Some(r)),
+                Err(_) => (None, None), /* child already reaped or wait failed */
+            };
             return Ok(RunResult::SignalForwarded {
                 signal: sig,
                 status,
+                rusage,
             });
         }
         WaitResult::TimedOut => { /* Continue to timeout handling below */ }
@@ -525,11 +546,12 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
         let grace_result = wait_with_kqueue(child, pid, kill_after, config.confine)?;
 
         match grace_result {
-            WaitResult::Exited(status) => {
+            WaitResult::Exited(status, rusage) => {
                 return Ok(RunResult::TimedOut {
                     signal: config.signal,
                     killed: false,
                     status: Some(status),
+                    rusage: Some(rusage),
                     hook: hook_result,
                 });
             }
@@ -539,10 +561,15 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
                     crate::eprintln!("timeout: forwarding signal {} to command", signal_name(sig));
                 }
                 send_signal(pid, sig, config.foreground)?;
-                let status = child.wait().ok();
+                /* wait for child - extract rusage even if wait returns error (child exited) */
+                let (status, rusage) = match child.wait() {
+                    Ok((s, r)) => (Some(s), Some(r)),
+                    Err(_) => (None, None), /* child already reaped or wait failed */
+                };
                 return Ok(RunResult::SignalForwarded {
                     signal: sig,
                     status,
+                    rusage,
                 });
             }
             WaitResult::TimedOut => { /* Continue to SIGKILL below */ }
@@ -555,7 +582,7 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
 
         send_signal(pid, Signal::SIGKILL, config.foreground)?;
 
-        let status = child.wait().map_err(|e| match e {
+        let (status, rusage) = child.wait().map_err(|e| match e {
             SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
             _ => TimeoutError::Internal("wait failed".to_string()),
         })?;
@@ -564,11 +591,12 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
             signal: config.signal,
             killed: true,
             status: Some(status),
+            rusage: Some(rusage),
             hook: hook_result,
         })
     } else {
         /* no kill-after, just wait for it to die */
-        let status = child.wait().map_err(|e| match e {
+        let (status, rusage) = child.wait().map_err(|e| match e {
             SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
             _ => TimeoutError::Internal("wait failed".to_string()),
         })?;
@@ -577,6 +605,7 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
             signal: config.signal,
             killed: false,
             status: Some(status),
+            rusage: Some(rusage),
             hook: hook_result,
         })
     }
@@ -586,7 +615,7 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
  * What happened when we waited on the process.
  */
 enum WaitResult {
-    Exited(RawExitStatus),
+    Exited(RawExitStatus, ResourceUsage),
     TimedOut,
     /// Received a signal that should be forwarded to the child
     ReceivedSignal(Signal),
@@ -738,15 +767,15 @@ fn wait_with_kqueue(
             if err == libc::ESRCH {
                 // SAFETY: kq is a valid fd
                 unsafe { libc::close(kq) };
-                if let Ok(Some(status)) = child.try_wait() {
-                    return Ok(WaitResult::Exited(status));
+                if let Ok(Some((status, rusage))) = child.try_wait() {
+                    return Ok(WaitResult::Exited(status, rusage));
                 }
                 /* race: kernel says dead but try_wait says no - use blocking wait */
-                let status = child.wait().map_err(|e| match e {
+                let (status, rusage) = child.wait().map_err(|e| match e {
                     SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
                     _ => TimeoutError::Internal("wait failed".to_string()),
                 })?;
-                return Ok(WaitResult::Exited(status));
+                return Ok(WaitResult::Exited(status, rusage));
             }
             // SAFETY: kq is a valid fd
             unsafe { libc::close(kq) };
@@ -775,14 +804,14 @@ fn wait_with_kqueue(
         /* ESRCH - reap it */
         // SAFETY: kq is a valid fd
         unsafe { libc::close(kq) };
-        if let Ok(Some(status)) = child.try_wait() {
-            return Ok(WaitResult::Exited(status));
+        if let Ok(Some((status, rusage))) = child.try_wait() {
+            return Ok(WaitResult::Exited(status, rusage));
         }
-        let status = child.wait().map_err(|e| match e {
+        let (status, rusage) = child.wait().map_err(|e| match e {
             SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
             _ => TimeoutError::Internal("wait failed".to_string()),
         })?;
-        return Ok(WaitResult::Exited(status));
+        return Ok(WaitResult::Exited(status, rusage));
     }
 
     // SAFETY: kq is a valid fd
@@ -790,11 +819,11 @@ fn wait_with_kqueue(
 
     /* EVFILT_PROC = exited, EVFILT_TIMER = timed out, EVFILT_READ = signal received */
     if event.filter == libc::EVFILT_PROC {
-        let status = child.wait().map_err(|e| match e {
+        let (status, rusage) = child.wait().map_err(|e| match e {
             SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
             _ => TimeoutError::Internal("wait failed".to_string()),
         })?;
-        return Ok(WaitResult::Exited(status));
+        return Ok(WaitResult::Exited(status, rusage));
     }
 
     if event.filter == libc::EVFILT_READ {
@@ -998,9 +1027,9 @@ fn wait_for_hook_with_kqueue(
                 // SAFETY: kq is a valid fd from kqueue() above.
                 unsafe { libc::close(kq) };
                 return match child.try_wait() {
-                    Ok(Some(status)) => HookWaitResult::Exited(status),
+                    Ok(Some((status, _rusage))) => HookWaitResult::Exited(status),
                     Ok(None) => match child.wait() {
-                        Ok(status) => HookWaitResult::Exited(status),
+                        Ok((status, _rusage)) => HookWaitResult::Exited(status),
                         Err(e) => HookWaitResult::Error(format!("{}", e)),
                     },
                     Err(e) => HookWaitResult::Error(format!("{}", e)),
@@ -1021,7 +1050,7 @@ fn wait_for_hook_with_kqueue(
         unsafe { libc::close(kq) };
         if err_code == libc::ESRCH {
             return match child.wait() {
-                Ok(status) => HookWaitResult::Exited(status),
+                Ok((status, _rusage)) => HookWaitResult::Exited(status),
                 Err(e) => HookWaitResult::Error(format!("{}", e)),
             };
         }
@@ -1033,7 +1062,7 @@ fn wait_for_hook_with_kqueue(
 
     if event.filter == libc::EVFILT_PROC {
         match child.wait() {
-            Ok(status) => HookWaitResult::Exited(status),
+            Ok((status, _rusage)) => HookWaitResult::Exited(status),
             Err(e) => HookWaitResult::Error(format!("{}", e)),
         }
     } else {
@@ -1107,6 +1136,7 @@ mod tests {
             signal: Signal::SIGTERM,
             killed: false,
             status: None,
+            rusage: None,
             hook: None,
         };
 
@@ -1120,6 +1150,7 @@ mod tests {
             signal: Signal::SIGTERM,
             killed: true,
             status: None,
+            rusage: None,
             hook: None,
         };
 
@@ -1133,6 +1164,7 @@ mod tests {
             signal: Signal::SIGTERM,
             killed: false,
             status: None,
+            rusage: None,
             hook: None,
         };
 

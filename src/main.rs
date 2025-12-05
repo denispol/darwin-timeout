@@ -283,21 +283,40 @@ fn run_main() -> u8 {
 }
 
 fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
-    /* Schema version 2: added hook_* fields for on-timeout results */
-    const SCHEMA_VERSION: u8 = 2;
+    /* Schema version 3: added rusage fields (user_time_ms, system_time_ms, max_rss_kb) */
+    const SCHEMA_VERSION: u8 = 3;
+
+    /* helper to append rusage fields to JSON string */
+    fn append_rusage(json: &mut String, rusage: Option<&darwin_timeout::process::ResourceUsage>) {
+        if let Some(r) = rusage {
+            let _ = write!(
+                json,
+                r#","user_time_ms":{},"system_time_ms":{},"max_rss_kb":{}"#,
+                r.user_time_ms(),
+                r.system_time_ms(),
+                r.max_rss_kb
+            );
+        }
+    }
 
     match result {
-        RunResult::Completed(status) => {
+        RunResult::Completed { status, rusage } => {
             let code = status.code().unwrap_or(-1);
-            println!(
-                r#"{{"schema_version":{},"status":"completed","exit_code":{},"elapsed_ms":{}}}"#,
+            let mut json = String::with_capacity(128);
+            let _ = write!(
+                json,
+                r#"{{"schema_version":{},"status":"completed","exit_code":{},"elapsed_ms":{}"#,
                 SCHEMA_VERSION, code, elapsed_ms
             );
+            append_rusage(&mut json, Some(rusage));
+            json.push('}');
+            println!("{}", json);
         }
         RunResult::TimedOut {
             signal,
             killed,
             status,
+            rusage,
             hook,
         } => {
             let sig_num = darwin_timeout::signal::signal_number(*signal);
@@ -311,6 +330,9 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
                 r#"{{"schema_version":{},"status":"timeout","signal":"{}","signal_num":{},"killed":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}"#,
                 SCHEMA_VERSION, sig_name, sig_num, killed, status_code, exit_code, elapsed_ms
             );
+
+            /* Add rusage fields if available */
+            append_rusage(&mut json, rusage.as_ref());
 
             /* Add hook fields if hook was run */
             if let Some(h) = hook {
@@ -334,11 +356,17 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
             json.push('}');
             println!("{}", json);
         }
-        RunResult::SignalForwarded { signal, status } => {
+        RunResult::SignalForwarded {
+            signal,
+            status,
+            rusage,
+        } => {
             let sig_num = darwin_timeout::signal::signal_number(*signal);
             let status_code = status.and_then(|s| s.code()).unwrap_or(-1);
-            println!(
-                r#"{{"schema_version":{},"status":"signal_forwarded","signal":"{}","signal_num":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}}}"#,
+            let mut json = String::with_capacity(128);
+            let _ = write!(
+                json,
+                r#"{{"schema_version":{},"status":"signal_forwarded","signal":"{}","signal_num":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}"#,
                 SCHEMA_VERSION,
                 darwin_timeout::signal::signal_name(*signal),
                 sig_num,
@@ -346,12 +374,15 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
                 exit_code,
                 elapsed_ms
             );
+            append_rusage(&mut json, rusage.as_ref());
+            json.push('}');
+            println!("{}", json);
         }
     }
 }
 
 fn print_json_error(err: &darwin_timeout::error::TimeoutError, elapsed_ms: u64) {
-    const SCHEMA_VERSION: u8 = 2;
+    const SCHEMA_VERSION: u8 = 3;
 
     let exit_code = err.exit_code();
     /* Escape control characters for valid JSON */
