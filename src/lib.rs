@@ -50,7 +50,7 @@ pub use duration::{is_no_timeout, parse_duration};
 pub use error::{Result, TimeoutError, exit_codes};
 pub use process::ResourceUsage;
 pub use runner::{
-    HookResult, RunConfig, RunResult, cleanup_signal_forwarding, run_command,
-    setup_signal_forwarding,
+    AttemptResult, Attempts, HookResult, MAX_RETRIES, RunConfig, RunResult,
+    cleanup_signal_forwarding, run_command, run_with_retry, setup_signal_forwarding,
 };
 pub use signal::{parse_signal, signal_name, signal_number};

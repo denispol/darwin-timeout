@@ -30,6 +30,7 @@ use crate::error::{Result, TimeoutError, exit_codes};
 use crate::process::{RawChild, RawExitStatus, ResourceUsage, SpawnError, spawn_command};
 use crate::signal::{Signal, parse_signal, signal_name, signal_number};
 use crate::sync::AtomicOnce;
+use crate::wait::kqueue_delay;
 
 type RawFd = i32;
 
@@ -49,13 +50,17 @@ type RawFd = i32;
  * We forward SIGTERM, SIGINT, SIGHUP. The "please die" signals.
  */
 
-static SIGNAL_PIPE: AtomicOnce<RawFd> = AtomicOnce::new();
+/* Read end of signal pipe, -1 if not set. Can be reset by cleanup. */
+static SIGNAL_PIPE: AtomicI32 = AtomicI32::new(-1);
 
-/// Set up signal handlers for forwarding SIGTERM/SIGINT/SIGHUP to child.
+/// Set up signal handlers for forwarding signals to child process.
+///
+/// Handles: SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2.
 /// Returns fd that becomes readable when signal arrives. Call before spawn.
 ///
 /// Fds close automatically on exit. For library use (long-running process),
-/// call [`cleanup_signal_forwarding`] to avoid fd leaks.
+/// call [`cleanup_signal_forwarding`] after each run to avoid fd leaks and
+/// enable subsequent `setup_signal_forwarding` calls.
 #[must_use]
 pub fn setup_signal_forwarding() -> Option<RawFd> {
     /* Create pipe - write end for signal handler, read end for kqueue */
@@ -92,8 +97,11 @@ pub fn setup_signal_forwarding() -> Option<RawFd> {
         let _ = libc::fcntl(write_fd, libc::F_SETFD, libc::FD_CLOEXEC);
     }
 
-    /* Try to claim the signal pipe slot first, before setting up handlers */
-    if SIGNAL_PIPE.set(read_fd).is_err() {
+    /* Try to claim the signal pipe slot with CAS. -1 means not set. */
+    if SIGNAL_PIPE
+        .compare_exchange(-1, read_fd, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         /* Already set (re-entry) - close fds to avoid leak */
         // SAFETY: read_fd and write_fd are valid fds from pipe() above.
         // Both close calls share the same invariant (fd validity from pipe()).
@@ -102,12 +110,13 @@ pub fn setup_signal_forwarding() -> Option<RawFd> {
             libc::close(read_fd);
             libc::close(write_fd);
         }
-        return SIGNAL_PIPE.get().copied();
+        let existing = SIGNAL_PIPE.load(Ordering::SeqCst);
+        return if existing >= 0 { Some(existing) } else { None };
     }
 
-    /* Store write_fd for signal handler AFTER confirming we own the pipe slot.
-     * This prevents a race where the signal handler could see a write_fd
-     * that's about to be closed by a concurrent re-entry. */
+    /* Store write_fd BEFORE registering signal handlers to prevent race.
+     * If a signal arrives between sigaction() and store(), the handler would
+     * see -1 and drop the signal. Store first so handler always has valid fd. */
     SIGNAL_WRITE_FD.store(write_fd, Ordering::SeqCst);
 
     // SAFETY: sigaction struct is zeroed then properly initialized.
@@ -124,6 +133,9 @@ pub fn setup_signal_forwarding() -> Option<RawFd> {
         libc::sigaction(libc::SIGTERM, &sa, core::ptr::null_mut());
         libc::sigaction(libc::SIGINT, &sa, core::ptr::null_mut());
         libc::sigaction(libc::SIGHUP, &sa, core::ptr::null_mut());
+        libc::sigaction(libc::SIGQUIT, &sa, core::ptr::null_mut());
+        libc::sigaction(libc::SIGUSR1, &sa, core::ptr::null_mut());
+        libc::sigaction(libc::SIGUSR2, &sa, core::ptr::null_mut());
     }
 
     Some(read_fd)
@@ -135,30 +147,14 @@ static SIGNAL_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 /// Close signal pipe fds and reset handlers to default.
 ///
 /// Not needed for CLI (fds close on exit). For library use where you call
-/// `run_command` multiple times, this prevents fd leaks.
+/// `run_command` multiple times, this prevents fd leaks and resets state
+/// so `setup_signal_forwarding` can be called again.
 ///
 /// Don't call while another thread is inside `run_command`.
 pub fn cleanup_signal_forwarding() {
-    /* Close write fd first to prevent signal handler from writing to closed fd */
-    let write_fd = SIGNAL_WRITE_FD.swap(-1, Ordering::SeqCst);
-    if write_fd >= 0 {
-        // SAFETY: write_fd was set by setup_signal_forwarding and is valid.
-        unsafe {
-            libc::close(write_fd);
-        }
-    }
-
-    /* Read fd is in SIGNAL_PIPE - we can't "unset" AtomicOnce, but we can close it.
-     * The fd will be invalid if used again, but setup_signal_forwarding checks
-     * if SIGNAL_PIPE is already set and returns early, so this is fine. */
-    if let Some(&read_fd) = SIGNAL_PIPE.get() {
-        // SAFETY: read_fd was set by setup_signal_forwarding and is valid.
-        unsafe {
-            libc::close(read_fd);
-        }
-    }
-
-    /* Reset signal handlers to default */
+    /* Reset signal handlers FIRST to prevent writes during fd cleanup.
+     * Otherwise a signal arriving between swap(-1) and close() could
+     * write to a closed fd (harmless EBADF) or worse, a reused fd. */
     // SAFETY: SIG_DFL is the standard default handler, sigaction is safe with valid args.
     // All ops share the invariant of resetting signal handlers atomically.
     #[allow(clippy::multiple_unsafe_ops_per_block)]
@@ -171,6 +167,27 @@ pub fn cleanup_signal_forwarding() {
         libc::sigaction(libc::SIGTERM, &sa, core::ptr::null_mut());
         libc::sigaction(libc::SIGINT, &sa, core::ptr::null_mut());
         libc::sigaction(libc::SIGHUP, &sa, core::ptr::null_mut());
+        libc::sigaction(libc::SIGQUIT, &sa, core::ptr::null_mut());
+        libc::sigaction(libc::SIGUSR1, &sa, core::ptr::null_mut());
+        libc::sigaction(libc::SIGUSR2, &sa, core::ptr::null_mut());
+    }
+
+    /* Now safe to close fds - no signal handler will write to them */
+    let write_fd = SIGNAL_WRITE_FD.swap(-1, Ordering::SeqCst);
+    if write_fd >= 0 {
+        // SAFETY: write_fd was set by setup_signal_forwarding and is valid.
+        unsafe {
+            libc::close(write_fd);
+        }
+    }
+
+    /* Close read fd and reset SIGNAL_PIPE to -1 so setup can be called again */
+    let read_fd = SIGNAL_PIPE.swap(-1, Ordering::SeqCst);
+    if read_fd >= 0 {
+        // SAFETY: read_fd was set by setup_signal_forwarding and is valid.
+        unsafe {
+            libc::close(read_fd);
+        }
     }
 }
 
@@ -322,8 +339,17 @@ fn duration_to_ns(d: Duration) -> u64 {
         .min(MAX_TIMER_NS)
 }
 
+/* duration to ms as u64 (avoids u128 from as_millis()) */
+#[inline]
+fn duration_ms(d: Duration) -> u64 {
+    d.as_secs()
+        .saturating_mul(1000)
+        .saturating_add(u64::from(d.subsec_millis()))
+}
+
 /* what happened when we ran the on-timeout hook */
-#[derive(Debug, Clone, Default)]
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Default)]
 pub struct HookResult {
     pub ran: bool,              /* did we actually run it? */
     pub exit_code: Option<i32>, /* None if timed out or failed to start */
@@ -331,8 +357,64 @@ pub struct HookResult {
     pub elapsed_ms: u64,        /* how long it ran */
 }
 
-/* what happened when we ran the command */
-#[derive(Debug)]
+/* result of a single attempt in retry mode */
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Copy, Default)]
+pub struct AttemptResult {
+    pub status: &'static str,   /* "completed", "timeout", "error" */
+    pub exit_code: Option<i32>, /* exit code if completed */
+    pub elapsed_ms: u64,        /* how long this attempt took */
+}
+
+/* fixed-size array of attempt results - avoids Vec allocation overhead */
+pub const MAX_RETRIES: usize = 32;
+
+pub struct Attempts {
+    data: [AttemptResult; MAX_RETRIES],
+    len: usize,
+}
+
+impl Default for Attempts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Attempts {
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            data: [AttemptResult::default(); MAX_RETRIES],
+            len: 0,
+        }
+    }
+
+    #[inline]
+    pub fn push(&mut self, item: AttemptResult) {
+        if self.len < MAX_RETRIES {
+            self.data[self.len] = item;
+            self.len += 1;
+        }
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[AttemptResult] {
+        &self.data[..self.len]
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/* what happened when we ran the command (possibly with retries) */
+#[cfg_attr(test, derive(Debug))]
 pub enum RunResult {
     Completed {
         status: RawExitStatus,
@@ -425,6 +507,9 @@ pub struct RunConfig {
     pub on_timeout: Option<String>,   /* hook to run before killing (%p = PID) */
     pub on_timeout_limit: Duration,   /* how long hook gets to run */
     pub confine: Confine,             /* wall (includes sleep) or active (excludes sleep) */
+    pub retry_count: u32,             /* number of retries on timeout (0 = no retry) */
+    pub retry_delay: Duration,        /* delay between retries */
+    pub retry_backoff: u32,           /* multiplier for delay each retry (1 = no backoff) */
 }
 
 impl RunConfig {
@@ -438,6 +523,42 @@ impl RunConfig {
             .map(|s| parse_duration(s))
             .transpose()?;
         let on_timeout_limit = parse_duration(&args.on_timeout_limit)?;
+
+        /* parse retry options */
+        let retry_count = args
+            .retry
+            .as_ref()
+            .map(|s| {
+                s.parse::<u32>()
+                    .map_err(|_| TimeoutError::Internal(format!("invalid retry count: '{}'", s)))
+            })
+            .transpose()?
+            .unwrap_or(0);
+
+        let retry_delay = args
+            .retry_delay
+            .as_ref()
+            .map(|s| parse_duration(s))
+            .transpose()?
+            .unwrap_or(Duration::ZERO);
+
+        /* parse backoff multiplier - strip 'x' suffix if present */
+        /* ensure >= 1 to prevent 0^n = 0 zeroing all delays */
+        let retry_backoff = args
+            .retry_backoff
+            .as_ref()
+            .map(|s| {
+                let s = s.trim_end_matches('x').trim_end_matches('X');
+                s.parse::<u32>().map_err(|_| {
+                    TimeoutError::Internal(format!(
+                        "invalid retry backoff: '{}' (use e.g., 2x)",
+                        args.retry_backoff.as_ref().unwrap()
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or(1)
+            .max(1);
 
         /* Warn if on-timeout-limit exceeds main timeout (when hook is set) */
         if args.on_timeout.is_some() && on_timeout_limit > timeout && !is_no_timeout(&timeout) {
@@ -459,6 +580,9 @@ impl RunConfig {
             on_timeout: args.on_timeout.clone(),
             on_timeout_limit,
             confine: args.confine,
+            retry_count,
+            retry_delay,
+            retry_backoff,
         })
     }
 }
@@ -488,6 +612,131 @@ pub fn run_command(command: &str, args: &[String], config: &RunConfig) -> Result
     }
 
     monitor_with_timeout(&mut child, config)
+}
+
+/// Run command with retry on timeout.
+///
+/// Returns the final result and attempt results for JSON output.
+/// Only retries on timeout - other failures (exit code, signal) are returned immediately.
+/// Max retries capped at MAX_RETRIES (32) to avoid unbounded allocation.
+pub fn run_with_retry(
+    command: &str,
+    args: &[String],
+    config: &RunConfig,
+) -> Result<(RunResult, Attempts)> {
+    /* max_attempts = retry_count + 1 (initial attempt), capped at MAX_RETRIES */
+    /* note: --retry=31 gives 32 attempts (max), --retry=32+ also gives 32 */
+    let capped_retry = config.retry_count.min(MAX_RETRIES as u32 - 1);
+    if config.verbose && !config.quiet && config.retry_count > capped_retry {
+        crate::eprintln!(
+            "timeout: warning: retry count {} capped to maximum {}",
+            config.retry_count,
+            MAX_RETRIES - 1
+        );
+    }
+    let max_attempts = capped_retry.saturating_add(1);
+    let mut attempts = Attempts::new();
+    let signal_fd = {
+        let fd = SIGNAL_PIPE.load(Ordering::SeqCst);
+        if fd >= 0 { Some(fd) } else { None }
+    };
+
+    /* safety counter to prevent infinite loops even if logic has bugs */
+    let mut safety_counter: u32 = 0;
+    const SAFETY_LIMIT: u32 = MAX_RETRIES as u32 + 10;
+
+    for attempt in 0..max_attempts {
+        /* defense-in-depth: abort if we've looped too many times */
+        safety_counter += 1;
+        if safety_counter > SAFETY_LIMIT {
+            return Err(TimeoutError::Internal(
+                "retry loop exceeded safety limit".to_string(),
+            ));
+        }
+
+        let attempt_start = precise_now_ns(config.confine).unwrap_or(0);
+
+        let result = run_command(command, args, config)?;
+        let attempt_elapsed_ms = precise_now_ns(config.confine)
+            .unwrap_or(attempt_start)
+            .saturating_sub(attempt_start)
+            / 1_000_000;
+
+        match &result {
+            RunResult::TimedOut { .. } => {
+                attempts.push(AttemptResult {
+                    status: "timeout",
+                    exit_code: None,
+                    elapsed_ms: attempt_elapsed_ms,
+                });
+
+                /* check if we should retry */
+                let is_last_attempt = attempt + 1 >= max_attempts;
+                if is_last_attempt {
+                    return Ok((result, attempts));
+                }
+
+                /* calculate delay with exponential backoff */
+                /* backoff^attempt: attempt 0 gets base delay, attempt 1 gets delay*backoff, etc */
+                /* cap at 5 minutes to prevent runaway delays with large backoff values */
+                const MAX_DELAY_MS: u64 = 5 * 60 * 1000; /* 5 minutes */
+                let delay = if config.retry_backoff > 1 {
+                    let multiplier = (config.retry_backoff as u64).saturating_pow(attempt);
+                    let delay_ms = duration_ms(config.retry_delay);
+                    let total_ms = delay_ms.saturating_mul(multiplier).min(MAX_DELAY_MS);
+                    Duration::from_millis(total_ms)
+                } else {
+                    config.retry_delay
+                };
+
+                if config.verbose && !config.quiet {
+                    crate::eprintln!(
+                        "timeout: attempt {} timed out, retry delay {}ms",
+                        attempt + 1,
+                        duration_ms(delay)
+                    );
+                }
+
+                /* wait with kqueue delay, checking for signals */
+                if !delay.is_zero() && !kqueue_delay(delay, signal_fd) {
+                    /* signal received during delay - abort retries */
+                    let sig = signal_fd
+                        .and_then(read_signal_from_pipe)
+                        .unwrap_or(Signal::SIGTERM); /* defensive fallback */
+                    return Ok((
+                        RunResult::SignalForwarded {
+                            signal: sig,
+                            status: None,
+                            rusage: None,
+                        },
+                        attempts,
+                    ));
+                }
+            }
+            RunResult::Completed { status, .. } => {
+                attempts.push(AttemptResult {
+                    status: "completed",
+                    exit_code: status.code(),
+                    elapsed_ms: attempt_elapsed_ms,
+                });
+                return Ok((result, attempts));
+            }
+            RunResult::SignalForwarded { .. } => {
+                /* signal forwarded - don't retry */
+                attempts.push(AttemptResult {
+                    status: "signal_forwarded",
+                    exit_code: None,
+                    elapsed_ms: attempt_elapsed_ms,
+                });
+                return Ok((result, attempts));
+            }
+        }
+    }
+
+    /* shouldn't reach here, but just in case */
+    Err(TimeoutError::Internal(
+        "retry loop exited unexpectedly".to_string(),
+    ))
 }
 
 /*
@@ -650,7 +899,10 @@ fn wait_with_kqueue(
     let timeout_ns = duration_to_ns(timeout);
 
     /* Get signal pipe fd if available */
-    let signal_fd = SIGNAL_PIPE.get().copied();
+    let signal_fd = {
+        let fd = SIGNAL_PIPE.load(Ordering::SeqCst);
+        if fd >= 0 { Some(fd) } else { None }
+    };
 
     /* create kqueue fd */
     // SAFETY: kqueue() has no preconditions, returns -1 on error (checked below).
@@ -767,15 +1019,23 @@ fn wait_with_kqueue(
             if err == libc::ESRCH {
                 // SAFETY: kq is a valid fd
                 unsafe { libc::close(kq) };
-                if let Ok(Some((status, rusage))) = child.try_wait() {
-                    return Ok(WaitResult::Exited(status, rusage));
+                /* try non-blocking first, fall back to blocking wait */
+                match child.try_wait() {
+                    Ok(Some((status, rusage))) => return Ok(WaitResult::Exited(status, rusage)),
+                    Ok(None) | Err(_) => {
+                        /* ESRCH from kernel but child not reaped yet - use blocking wait.
+                         * ECHILD error means already reaped elsewhere - treat as timeout. */
+                        match child.wait() {
+                            Ok((status, rusage)) => return Ok(WaitResult::Exited(status, rusage)),
+                            Err(SpawnError::Wait(e)) if e == libc::ECHILD => {
+                                return Ok(WaitResult::TimedOut);
+                            }
+                            Err(e) => {
+                                return Err(TimeoutError::Internal(format!("wait failed: {}", e)));
+                            }
+                        }
+                    }
                 }
-                /* race: kernel says dead but try_wait says no - use blocking wait */
-                let (status, rusage) = child.wait().map_err(|e| match e {
-                    SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
-                    _ => TimeoutError::Internal("wait failed".to_string()),
-                })?;
-                return Ok(WaitResult::Exited(status, rusage));
             }
             // SAFETY: kq is a valid fd
             unsafe { libc::close(kq) };
@@ -804,14 +1064,19 @@ fn wait_with_kqueue(
         /* ESRCH - reap it */
         // SAFETY: kq is a valid fd
         unsafe { libc::close(kq) };
-        if let Ok(Some((status, rusage))) = child.try_wait() {
-            return Ok(WaitResult::Exited(status, rusage));
+        /* try non-blocking first, fall back to blocking wait */
+        match child.try_wait() {
+            Ok(Some((status, rusage))) => return Ok(WaitResult::Exited(status, rusage)),
+            Ok(None) | Err(_) => match child.wait() {
+                Ok((status, rusage)) => return Ok(WaitResult::Exited(status, rusage)),
+                Err(SpawnError::Wait(e)) if e == libc::ECHILD => {
+                    return Ok(WaitResult::TimedOut);
+                }
+                Err(e) => {
+                    return Err(TimeoutError::Internal(format!("wait failed: {}", e)));
+                }
+            },
         }
-        let (status, rusage) = child.wait().map_err(|e| match e {
-            SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
-            _ => TimeoutError::Internal("wait failed".to_string()),
-        })?;
-        return Ok(WaitResult::Exited(status, rusage));
     }
 
     // SAFETY: kq is a valid fd
@@ -833,6 +1098,8 @@ fn wait_with_kqueue(
         {
             return Ok(WaitResult::ReceivedSignal(sig));
         }
+        /* Spurious wakeup or no data - treat as timeout since timer also fired
+         * or deadline passed. The caller will re-check the child status. */
     }
 
     Ok(WaitResult::TimedOut)
@@ -844,6 +1111,11 @@ fn wait_with_kqueue(
  * if the hook fails - the main timeout behavior must proceed.
  *
  * Substitution: %p -> PID, %% -> literal %
+ *
+ * Note: If the hook spawns processes that create their own process groups
+ * (e.g., via setsid or nohup), those won't be killed when the hook times out.
+ * Such orphans get reparented to init. For safety-critical use, hooks should
+ * not spawn long-lived background processes.
  */
 fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
     /* use 0 as fallback for timing if timebase fails - hook timing is best-effort */
@@ -859,8 +1131,9 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
         crate::eprintln!("timeout: running on-timeout hook: {}", expanded_cmd);
     }
 
-    /* Run via shell to support complex commands */
-    let spawn_result = spawn_command("sh", &[String::from("-c"), expanded_cmd], false);
+    /* Run via shell to support complex commands.
+     * Use process group so we can kill hook and all its children on timeout. */
+    let spawn_result = spawn_command("sh", &[String::from("-c"), expanded_cmd], true);
 
     let mut child = match spawn_result {
         Ok(c) => c,
@@ -909,7 +1182,10 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
             if config.verbose && !config.quiet {
                 crate::eprintln!("timeout: on-timeout hook timed out, killing");
             }
-            let _ = child.kill();
+            /* Kill entire process group to get grandchildren too */
+            let pid = child.id() as i32;
+            // SAFETY: killpg with valid pid and signal is safe
+            unsafe { libc::killpg(pid, libc::SIGKILL) };
             let _ = child.wait();
             HookResult {
                 ran: true,
