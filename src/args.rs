@@ -135,6 +135,9 @@ pub struct Args<'a> {
     pub confine: Confine,
     pub wait_for_file: Option<ArgValue<'a>>,
     pub wait_for_file_timeout: Option<ArgValue<'a>>,
+    pub retry: Option<ArgValue<'a>>,
+    pub retry_delay: Option<ArgValue<'a>>,
+    pub retry_backoff: Option<ArgValue<'a>>,
     pub duration: Option<ArgValue<'a>>,
     pub command: Option<ArgValue<'a>>,
     pub args: Vec<ArgValue<'a>>,
@@ -156,6 +159,9 @@ pub struct OwnedArgs {
     pub confine: Confine,
     pub wait_for_file: Option<String>,
     pub wait_for_file_timeout: Option<String>,
+    pub retry: Option<String>,
+    pub retry_delay: Option<String>,
+    pub retry_backoff: Option<String>,
     pub duration: Option<String>,
     pub command: Option<String>,
     pub args: Vec<String>,
@@ -178,6 +184,9 @@ impl<'a> Args<'a> {
             confine: self.confine,
             wait_for_file: self.wait_for_file.map(|v| v.into_owned()),
             wait_for_file_timeout: self.wait_for_file_timeout.map(|v| v.into_owned()),
+            retry: self.retry.map(|v| v.into_owned()),
+            retry_delay: self.retry_delay.map(|v| v.into_owned()),
+            retry_backoff: self.retry_backoff.map(|v| v.into_owned()),
             duration: self.duration.map(|v| v.into_owned()),
             command: self.command.map(|v| v.into_owned()),
             args: self.args.into_iter().map(|v| v.into_owned()).collect(),
@@ -219,6 +228,9 @@ pub fn parse_args() -> Result<OwnedArgs, ParseError> {
     }
     if owned.wait_for_file_timeout.is_none() {
         owned.wait_for_file_timeout = get_env(b"TIMEOUT_WAIT_FOR_FILE_TIMEOUT\0");
+    }
+    if owned.retry.is_none() {
+        owned.retry = get_env(b"TIMEOUT_RETRY\0").filter(|s| !s.is_empty());
     }
 
     Ok(owned)
@@ -397,6 +409,42 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                 result.wait_for_file_timeout = Some(ArgValue::Borrowed(&s[24..]));
             }
 
+            "--retry" => {
+                i += 1;
+                result.retry = Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                    ParseError {
+                        message: "--retry requires a count".to_string(),
+                    }
+                })?));
+            }
+            s if s.starts_with("--retry=") => {
+                result.retry = Some(ArgValue::Borrowed(&s[8..]));
+            }
+
+            "--retry-delay" => {
+                i += 1;
+                result.retry_delay = Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                    ParseError {
+                        message: "--retry-delay requires a duration".to_string(),
+                    }
+                })?));
+            }
+            s if s.starts_with("--retry-delay=") => {
+                result.retry_delay = Some(ArgValue::Borrowed(&s[14..]));
+            }
+
+            "--retry-backoff" => {
+                i += 1;
+                result.retry_backoff = Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                    ParseError {
+                        message: "--retry-backoff requires a multiplier (e.g., 2x)".to_string(),
+                    }
+                })?));
+            }
+            s if s.starts_with("--retry-backoff=") => {
+                result.retry_backoff = Some(ArgValue::Borrowed(&s[16..]));
+            }
+
             /* unknown long option */
             s if s.starts_with("--") => {
                 return Err(ParseError {
@@ -494,6 +542,20 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                                         })?;
                                 }
                             }
+                            b'r' => {
+                                if j + 1 < bytes.len() {
+                                    result.retry = Some(ArgValue::Owned(s[j + 1..].to_string()));
+                                    break;
+                                } else {
+                                    i += 1;
+                                    result.retry =
+                                        Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                                            ParseError {
+                                                message: "-r requires a retry count".to_string(),
+                                            }
+                                        })?));
+                                }
+                            }
                             c => {
                                 return Err(ParseError {
                                     message: format!("unknown option: -{}", c as char),
@@ -588,6 +650,9 @@ Options:
                                   [env: TIMEOUT_WAIT_FOR_FILE]
       --wait-for-file-timeout <DUR>  Timeout for --wait-for-file (default: wait forever)
                                   [env: TIMEOUT_WAIT_FOR_FILE_TIMEOUT]
+  -r, --retry <N>                 Retry command up to N times on timeout [env: TIMEOUT_RETRY]
+      --retry-delay <DURATION>    Delay between retries [default: 0]
+      --retry-backoff <Nx>        Multiply delay by N each retry (e.g., 2x for exponential)
       --json                      Output result as JSON (for scripting/CI)
   -h, --help                      Print help
   -V, --version                   Print version
@@ -605,6 +670,7 @@ Environment:
   TIMEOUT         Default duration if not specified on command line
   TIMEOUT_SIGNAL  Default signal (overridden by -s)
   TIMEOUT_KILL_AFTER  Default kill-after duration (overridden by -k)
+  TIMEOUT_RETRY   Default retry count (overridden by -r/--retry)
   TIMEOUT_WAIT_FOR_FILE  Default file to wait for
   TIMEOUT_WAIT_FOR_FILE_TIMEOUT  Default timeout for wait-for-file
 "#,
@@ -864,5 +930,141 @@ mod tests {
         let result = try_parse_from(["timeout", "--wait-for-file-timeout"]);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("requires a duration"));
+    }
+
+    /* retry argument tests */
+
+    #[test]
+    fn test_retry_short_flag() {
+        let args = try_parse_from(["timeout", "-r", "3", "5s", "cmd"]).unwrap();
+        assert_eq!(args.retry, Some("3".to_string()));
+    }
+
+    #[test]
+    fn test_retry_long_flag() {
+        let args = try_parse_from(["timeout", "--retry", "5", "5s", "cmd"]).unwrap();
+        assert_eq!(args.retry, Some("5".to_string()));
+    }
+
+    #[test]
+    fn test_retry_equals_syntax() {
+        let args = try_parse_from(["timeout", "--retry=2", "5s", "cmd"]).unwrap();
+        assert_eq!(args.retry, Some("2".to_string()));
+    }
+
+    #[test]
+    fn test_retry_delay() {
+        let args = try_parse_from([
+            "timeout",
+            "--retry",
+            "3",
+            "--retry-delay",
+            "2s",
+            "5s",
+            "cmd",
+        ])
+        .unwrap();
+        assert_eq!(args.retry, Some("3".to_string()));
+        assert_eq!(args.retry_delay, Some("2s".to_string()));
+    }
+
+    #[test]
+    fn test_retry_delay_equals_syntax() {
+        let args =
+            try_parse_from(["timeout", "--retry=3", "--retry-delay=500ms", "5s", "cmd"]).unwrap();
+        assert_eq!(args.retry, Some("3".to_string()));
+        assert_eq!(args.retry_delay, Some("500ms".to_string()));
+    }
+
+    #[test]
+    fn test_retry_backoff() {
+        let args = try_parse_from([
+            "timeout",
+            "--retry",
+            "3",
+            "--retry-delay",
+            "1s",
+            "--retry-backoff",
+            "2x",
+            "5s",
+            "cmd",
+        ])
+        .unwrap();
+        assert_eq!(args.retry, Some("3".to_string()));
+        assert_eq!(args.retry_delay, Some("1s".to_string()));
+        assert_eq!(args.retry_backoff, Some("2x".to_string()));
+    }
+
+    #[test]
+    fn test_retry_backoff_equals_syntax() {
+        let args = try_parse_from([
+            "timeout",
+            "--retry=5",
+            "--retry-delay=100ms",
+            "--retry-backoff=3x",
+            "5s",
+            "cmd",
+        ])
+        .unwrap();
+        assert_eq!(args.retry, Some("5".to_string()));
+        assert_eq!(args.retry_delay, Some("100ms".to_string()));
+        assert_eq!(args.retry_backoff, Some("3x".to_string()));
+    }
+
+    #[test]
+    fn test_retry_with_short_r() {
+        let args =
+            try_parse_from(["timeout", "-r", "2", "--retry-delay", "1s", "5s", "cmd"]).unwrap();
+        assert_eq!(args.retry, Some("2".to_string()));
+        assert_eq!(args.retry_delay, Some("1s".to_string()));
+    }
+
+    #[test]
+    fn test_retry_missing_count() {
+        let result = try_parse_from(["timeout", "--retry"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("requires a count"));
+    }
+
+    #[test]
+    fn test_retry_delay_missing_duration() {
+        let result = try_parse_from(["timeout", "--retry-delay"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("requires a duration"));
+    }
+
+    #[test]
+    fn test_retry_backoff_missing_multiplier() {
+        let result = try_parse_from(["timeout", "--retry-backoff"]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("requires a multiplier")
+        );
+    }
+
+    #[test]
+    fn test_retry_combined_with_other_flags() {
+        let args = try_parse_from([
+            "timeout",
+            "-v",
+            "--json",
+            "--retry",
+            "3",
+            "--retry-delay",
+            "1s",
+            "-s",
+            "INT",
+            "5s",
+            "cmd",
+        ])
+        .unwrap();
+        assert!(args.verbose);
+        assert!(args.json);
+        assert_eq!(args.retry, Some("3".to_string()));
+        assert_eq!(args.retry_delay, Some("1s".to_string()));
+        assert_eq!(args.signal, "INT");
     }
 }
