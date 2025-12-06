@@ -114,12 +114,16 @@ pub fn parse_signal(input: &str) -> Result<Signal> {
             .ok_or_else(|| TimeoutError::InvalidSignal(format!("invalid signal number: {num}")));
     }
 
-    /* strip optional SIG prefix without allocation */
-    let name = input
-        .strip_prefix("SIG")
-        .or_else(|| input.strip_prefix("sig"))
-        .or_else(|| input.strip_prefix("Sig"))
-        .unwrap_or(input);
+    /* strip optional SIG prefix case-insensitively */
+    let name = if input.len() >= 3
+        && input.as_bytes()[0].eq_ignore_ascii_case(&b'S')
+        && input.as_bytes()[1].eq_ignore_ascii_case(&b'I')
+        && input.as_bytes()[2].eq_ignore_ascii_case(&b'G')
+    {
+        &input[3..]
+    } else {
+        input
+    };
 
     /* case-insensitive comparison without heap allocation */
     /* ordered by frequency: TERM and KILL cover 99% of usage */
