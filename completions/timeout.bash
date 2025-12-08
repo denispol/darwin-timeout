@@ -15,9 +15,19 @@ _timeout_completions() {
             COMPREPLY=($(compgen -W "$signals" -- "$cur"))
             return 0
             ;;
-        -k|--kill-after|--on-timeout-limit|--wait-for-file-timeout)
+        -k|--kill-after|--on-timeout-limit|--wait-for-file-timeout|--retry-delay)
             # Duration suffixes
             COMPREPLY=($(compgen -W "1s 5s 10s 30s 1m 5m" -- "$cur"))
+            return 0
+            ;;
+        -r|--retry)
+            # Common retry counts
+            COMPREPLY=($(compgen -W "1 2 3 5 10" -- "$cur"))
+            return 0
+            ;;
+        --retry-backoff)
+            # Common backoff multipliers
+            COMPREPLY=($(compgen -W "2x 3x 4x" -- "$cur"))
             return 0
             ;;
         --timeout-exit-code)
@@ -44,7 +54,8 @@ _timeout_completions() {
     if [[ "$cur" == -* ]]; then
         opts="-s --signal -k --kill-after -p --preserve-status -f --foreground"
         opts="$opts -v --verbose -q --quiet -c --confine --timeout-exit-code --on-timeout"
-        opts="$opts --on-timeout-limit --wait-for-file --wait-for-file-timeout --json -h --help -V --version"
+        opts="$opts --on-timeout-limit --wait-for-file --wait-for-file-timeout"
+        opts="$opts -r --retry --retry-delay --retry-backoff --json -h --help -V --version"
         COMPREPLY=($(compgen -W "$opts" -- "$cur"))
         return 0
     fi

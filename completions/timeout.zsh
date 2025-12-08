@@ -48,6 +48,9 @@ _timeout() {
         '--on-timeout-limit[timeout for hook command]:duration:->duration' \
         '--wait-for-file[wait for file to exist before starting]:file:_files' \
         '--wait-for-file-timeout[timeout for wait-for-file]:duration:->duration' \
+        '(-r --retry)'{-r,--retry}'[retry command N times on timeout]:count:(1 2 3 5 10)' \
+        '--retry-delay[delay between retries]:duration:->duration' \
+        '--retry-backoff[multiply delay by N each retry]:multiplier:(2x 3x 4x)' \
         '--json[output JSON for scripting]' \
         '1:duration:->duration' \
         '2:command:_command_names' \

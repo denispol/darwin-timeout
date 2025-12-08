@@ -18,7 +18,9 @@ use core::fmt::Write as FmtWrite;
 use darwin_timeout::args::{OwnedArgs, parse_args};
 use darwin_timeout::duration::parse_duration;
 use darwin_timeout::error::exit_codes;
-use darwin_timeout::runner::{RunConfig, RunResult, run_command, setup_signal_forwarding};
+use darwin_timeout::runner::{
+    AttemptResult, RunConfig, RunResult, run_with_retry, setup_signal_forwarding,
+};
 use darwin_timeout::wait::wait_for_file;
 use darwin_timeout::{eprintln, println};
 
@@ -244,14 +246,14 @@ fn run_main() -> u8 {
     let _ = setup_signal_forwarding();
 
     let start_ns = precise_now_ns().unwrap_or(0);
-    let result = run_command(&command, &extra_args, &config);
+    let result = run_with_retry(&command, &extra_args, &config);
     let elapsed_ms = precise_now_ns()
         .unwrap_or(start_ns)
         .saturating_sub(start_ns)
         / 1_000_000;
 
     match result {
-        Ok(run_result) => {
+        Ok((run_result, attempts)) => {
             let exit_code = run_result.exit_code(args.preserve_status, config.timeout_exit_code);
 
             /* Warn if custom exit code conflicts with reserved codes (only when timeout occurs) */
@@ -266,7 +268,13 @@ fn run_main() -> u8 {
             }
 
             if args.json {
-                print_json_output(&run_result, elapsed_ms, exit_code);
+                print_json_output(
+                    &run_result,
+                    elapsed_ms,
+                    exit_code,
+                    attempts.as_slice(),
+                    config.retry_count,
+                );
             }
 
             exit_code
@@ -282,9 +290,23 @@ fn run_main() -> u8 {
     }
 }
 
-fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
-    /* Schema version 3: added rusage fields (user_time_ms, system_time_ms, max_rss_kb) */
-    const SCHEMA_VERSION: u8 = 3;
+/*
+ * Print JSON output as a single line.
+ *
+ * JSON is built in memory first, then written with a single println! call.
+ * This minimizes the window where a signal could interrupt output, though
+ * SIGKILL during the write could still produce partial output. CI systems
+ * parsing this output should validate JSON before processing.
+ */
+fn print_json_output(
+    result: &RunResult,
+    elapsed_ms: u64,
+    exit_code: u8,
+    attempts: &[AttemptResult],
+    retry_count: u32,
+) {
+    /* Schema version 4: added retry fields (attempts, attempt_results) */
+    const SCHEMA_VERSION: u8 = 4;
 
     /* helper to append rusage fields to JSON string */
     fn append_rusage(json: &mut String, rusage: Option<&darwin_timeout::process::ResourceUsage>) {
@@ -299,16 +321,41 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
         }
     }
 
+    /* helper to append attempt_results array if retries were configured */
+    fn append_attempts(json: &mut String, attempts: &[AttemptResult], retry_count: u32) {
+        if retry_count == 0 {
+            return;
+        }
+        let _ = write!(json, r#","attempts":{}"#, attempts.len());
+        json.push_str(r#","attempt_results":["#);
+        for (i, a) in attempts.iter().enumerate() {
+            if i > 0 {
+                json.push(',');
+            }
+            /* exit_code is null for timeout/signal, integer for completed */
+            let exit_str = a
+                .exit_code
+                .map_or_else(|| "null".into(), |c| alloc::format!("{}", c));
+            let _ = write!(
+                json,
+                r#"{{"status":"{}","exit_code":{},"elapsed_ms":{}}}"#,
+                a.status, exit_str, a.elapsed_ms
+            );
+        }
+        json.push(']');
+    }
+
     match result {
         RunResult::Completed { status, rusage } => {
             let code = status.code().unwrap_or(-1);
-            let mut json = String::with_capacity(128);
+            let mut json = String::with_capacity(256);
             let _ = write!(
                 json,
                 r#"{{"schema_version":{},"status":"completed","exit_code":{},"elapsed_ms":{}"#,
                 SCHEMA_VERSION, code, elapsed_ms
             );
             append_rusage(&mut json, Some(rusage));
+            append_attempts(&mut json, attempts, retry_count);
             json.push('}');
             println!("{}", json);
         }
@@ -324,7 +371,7 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
             let sig_name = darwin_timeout::signal::signal_name(*signal);
 
             /* Build the JSON incrementally */
-            let mut json = String::with_capacity(256);
+            let mut json = String::with_capacity(512);
             let _ = write!(
                 json,
                 r#"{{"schema_version":{},"status":"timeout","signal":"{}","signal_num":{},"killed":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}"#,
@@ -353,6 +400,8 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
                     }
                 }
             }
+
+            append_attempts(&mut json, attempts, retry_count);
             json.push('}');
             println!("{}", json);
         }
@@ -363,7 +412,7 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
         } => {
             let sig_num = darwin_timeout::signal::signal_number(*signal);
             let status_code = status.and_then(|s| s.code()).unwrap_or(-1);
-            let mut json = String::with_capacity(128);
+            let mut json = String::with_capacity(256);
             let _ = write!(
                 json,
                 r#"{{"schema_version":{},"status":"signal_forwarded","signal":"{}","signal_num":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}"#,
@@ -375,6 +424,7 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
                 elapsed_ms
             );
             append_rusage(&mut json, rusage.as_ref());
+            append_attempts(&mut json, attempts, retry_count);
             json.push('}');
             println!("{}", json);
         }
@@ -382,7 +432,7 @@ fn print_json_output(result: &RunResult, elapsed_ms: u64, exit_code: u8) {
 }
 
 fn print_json_error(err: &darwin_timeout::error::TimeoutError, elapsed_ms: u64) {
-    const SCHEMA_VERSION: u8 = 3;
+    const SCHEMA_VERSION: u8 = 4;
 
     let exit_code = err.exit_code();
     /* Escape control characters for valid JSON */

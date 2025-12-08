@@ -1495,28 +1495,28 @@ fn test_quiet_verbose_conflict() {
 #[test]
 fn test_json_schema_version() {
     /*
-     * All JSON output should include schema_version field (version 3 with rusage fields)
+     * All JSON output should include schema_version field (version 4 with retry fields)
      */
     /* Test completed */
     timeout_cmd()
         .args(["--json", "5s", "true"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""schema_version":3"#));
+        .stdout(predicate::str::contains(r#""schema_version":4"#));
 
     /* Test timeout */
     timeout_cmd()
         .args(["--json", "0.1s", "sleep", "10"])
         .assert()
         .code(124)
-        .stdout(predicate::str::contains(r#""schema_version":3"#));
+        .stdout(predicate::str::contains(r#""schema_version":4"#));
 
     /* Test error */
     timeout_cmd()
         .args(["--json", "5s", "nonexistent_command_xyz_12345"])
         .assert()
         .code(127)
-        .stdout(predicate::str::contains(r#""schema_version":3"#));
+        .stdout(predicate::str::contains(r#""schema_version":4"#));
 }
 
 #[test]
@@ -1956,4 +1956,283 @@ fn test_wait_for_file_cli_overrides_env() {
         .assert()
         .success()
         .stdout(predicate::str::contains("cli wins"));
+}
+
+/* ===== Retry Tests ===== */
+
+#[test]
+fn test_retry_no_timeout_no_retry() {
+    /*
+     * When command succeeds, retry should not trigger
+     */
+    timeout_cmd()
+        .args(["--retry", "3", "5s", "true"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_retry_json_no_retry_configured() {
+    /*
+     * Without --retry, JSON should not include attempt_results
+     */
+    let output = timeout_cmd()
+        .args(["--json", "5s", "true"])
+        .output()
+        .expect("failed to run command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("attempt_results"),
+        "should not include attempt_results without --retry"
+    );
+    assert!(
+        !stdout.contains(r#""attempts":"#),
+        "should not include attempts count without --retry"
+    );
+}
+
+#[test]
+fn test_retry_json_with_retry_configured() {
+    /*
+     * With --retry, JSON should include attempt_results even on first success
+     */
+    let output = timeout_cmd()
+        .args(["--json", "--retry", "3", "5s", "true"])
+        .output()
+        .expect("failed to run command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(r#""attempts":1"#),
+        "should have 1 attempt on success: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("attempt_results"),
+        "should include attempt_results with --retry: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""status":"completed""#),
+        "first attempt should be completed: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_retry_timeout_triggers_retry() {
+    /*
+     * On timeout, retry should run command again
+     */
+    let output = timeout_cmd()
+        .args(["--json", "--retry", "1", "-v", "0.1s", "sleep", "10"])
+        .output()
+        .expect("failed to run command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    /* Should have 2 attempts (initial + 1 retry) */
+    assert!(
+        stdout.contains(r#""attempts":2"#),
+        "should have 2 attempts: {}",
+        stdout
+    );
+
+    /* attempt_results should contain 2 entries */
+    assert!(
+        stdout.contains("attempt_results"),
+        "should include attempt_results: {}",
+        stdout
+    );
+
+    /* Verbose should show retry message */
+    assert!(
+        stderr.contains("retry"),
+        "verbose should show retry message: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_retry_respects_retry_count() {
+    /*
+     * Should not retry more than N times
+     */
+    let start = std::time::Instant::now();
+    let output = timeout_cmd()
+        .args(["--json", "--retry", "2", "0.1s", "sleep", "10"])
+        .output()
+        .expect("failed to run command");
+
+    let elapsed = start.elapsed();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    /* Should have 3 attempts total (initial + 2 retries) */
+    assert!(
+        stdout.contains(r#""attempts":3"#),
+        "should have 3 attempts: {}",
+        stdout
+    );
+
+    /* Should take ~300ms (3 * 100ms timeout) */
+    assert!(
+        elapsed.as_millis() >= 280,
+        "should take at least 300ms for 3 attempts: {:?}",
+        elapsed
+    );
+    assert!(
+        elapsed.as_millis() < 1000,
+        "should not take too long (no excessive delays): {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn test_retry_delay() {
+    /*
+     * --retry-delay should add delay between retries
+     */
+    let start = std::time::Instant::now();
+    timeout_cmd()
+        .args([
+            "--retry",
+            "1",
+            "--retry-delay",
+            "200ms",
+            "0.1s",
+            "sleep",
+            "10",
+        ])
+        .output()
+        .expect("failed to run command");
+
+    let elapsed = start.elapsed();
+
+    /* Should take at least 400ms (2 * 100ms timeout + 200ms delay) */
+    assert!(
+        elapsed.as_millis() >= 380,
+        "should include retry delay: {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn test_retry_backoff() {
+    /*
+     * --retry-backoff should multiply delay each retry
+     */
+    let start = std::time::Instant::now();
+    timeout_cmd()
+        .args([
+            "--retry",
+            "2",
+            "--retry-delay",
+            "100ms",
+            "--retry-backoff",
+            "2x",
+            "50ms",
+            "sleep",
+            "10",
+        ])
+        .output()
+        .expect("failed to run command");
+
+    let elapsed = start.elapsed();
+
+    /* Should take at least 450ms:
+     * - attempt 1: 50ms timeout
+     * - delay: 100ms
+     * - attempt 2: 50ms timeout
+     * - delay: 200ms (100ms * 2)
+     * - attempt 3: 50ms timeout
+     * Total: 150ms timeout + 300ms delay = 450ms
+     */
+    assert!(
+        elapsed.as_millis() >= 400,
+        "should include exponential backoff delays: {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn test_retry_env_var() {
+    /*
+     * TIMEOUT_RETRY env var should set default retry count
+     */
+    let output = timeout_cmd()
+        .env("TIMEOUT_RETRY", "1")
+        .args(["--json", "0.1s", "sleep", "10"])
+        .output()
+        .expect("failed to run command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(r#""attempts":2"#),
+        "env var should enable retry: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_retry_cli_overrides_env() {
+    /*
+     * CLI --retry should override TIMEOUT_RETRY env var
+     */
+    let output = timeout_cmd()
+        .env("TIMEOUT_RETRY", "5")
+        .args(["--json", "--retry", "1", "0.1s", "sleep", "10"])
+        .output()
+        .expect("failed to run command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    /* Should only have 2 attempts (--retry 1), not 6 (env var 5) */
+    assert!(
+        stdout.contains(r#""attempts":2"#),
+        "CLI should override env var: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_retry_short_flag() {
+    /*
+     * -r should work as short form of --retry
+     */
+    let output = timeout_cmd()
+        .args(["--json", "-r", "1", "0.1s", "sleep", "10"])
+        .output()
+        .expect("failed to run command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(r#""attempts":2"#),
+        "-r should enable retry: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_retry_does_not_retry_on_success() {
+    /*
+     * Retry should only trigger on timeout, not on command failure
+     */
+    let output = timeout_cmd()
+        .args(["--json", "--retry", "3", "5s", "false"])
+        .output()
+        .expect("failed to run command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    /* Command failed immediately, should not retry */
+    assert!(
+        stdout.contains(r#""attempts":1"#),
+        "should not retry on command failure: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""exit_code":1"#),
+        "should preserve exit code: {}",
+        stdout
+    );
 }

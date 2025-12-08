@@ -253,17 +253,26 @@ impl RawChild {
     /// Wait for the process to exit, blocking. Returns exit status and resource usage.
     pub fn wait(&mut self) -> Result<(RawExitStatus, ResourceUsage), SpawnError> {
         if self.exited {
-            return Err(SpawnError::Wait(0));
+            return Err(SpawnError::Wait(libc::ECHILD)); /* "No child processes" */
         }
 
         let mut status: i32 = 0;
         // SAFETY: libc::rusage is a C struct that's safe to zero-initialize
         let mut rusage: libc::rusage = unsafe { core::mem::zeroed() };
-        // SAFETY: pid is valid from spawn, status and rusage are valid pointers
-        let ret = unsafe { libc::wait4(self.pid, &mut status, 0, &mut rusage) };
 
-        if ret < 0 {
-            return Err(SpawnError::Wait(errno()));
+        /* retry on EINTR - signals can interrupt blocking wait */
+        loop {
+            // SAFETY: pid is valid from spawn, status and rusage are valid pointers
+            let ret = unsafe { libc::wait4(self.pid, &mut status, 0, &mut rusage) };
+
+            if ret < 0 {
+                let err = errno();
+                if err == libc::EINTR {
+                    continue; /* interrupted by signal, retry */
+                }
+                return Err(SpawnError::Wait(err));
+            }
+            break;
         }
 
         self.exited = true;
@@ -273,7 +282,7 @@ impl RawChild {
     /// Check if process has exited without blocking. Returns exit status and resource usage if exited.
     pub fn try_wait(&mut self) -> Result<Option<(RawExitStatus, ResourceUsage)>, SpawnError> {
         if self.exited {
-            return Ok(None);
+            return Err(SpawnError::Wait(libc::ECHILD)); /* already reaped */
         }
 
         let mut status: i32 = 0;

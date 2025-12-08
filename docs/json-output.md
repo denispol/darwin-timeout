@@ -12,10 +12,10 @@ Output is a single JSON object on stdout. The command's own stdout/stderr pass t
 
 ## Schema Version
 
-All JSON output includes a `schema_version` field. The current version is **3**.
+All JSON output includes a `schema_version` field. The current version is **4**.
 
 ```json
-{"schema_version":3,"status":"completed",...}
+{"schema_version":4,"status":"completed",...}
 ```
 
 Schema changes:
@@ -23,6 +23,7 @@ Schema changes:
 - **v1**: Initial release
 - **v2**: Added `hook_*` fields for `--on-timeout` results
 - **v3**: Added resource usage fields (`user_time_ms`, `system_time_ms`, `max_rss_kb`)
+- **v4**: Added retry fields (`attempts`, `attempt_results`)
 
 ## Status Types
 
@@ -43,7 +44,7 @@ Command finished normally before the timeout.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "status": "completed",
   "exit_code": 0,
   "elapsed_ms": 1523,
@@ -55,7 +56,7 @@ Command finished normally before the timeout.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 3) |
+| `schema_version` | integer | Schema version (currently 4) |
 | `status` | string | Always `"completed"` |
 | `exit_code` | integer | Command's exit code (0-255) |
 | `elapsed_ms` | integer | Wall-clock time in milliseconds |
@@ -69,7 +70,7 @@ Command was killed because it exceeded the time limit.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "status": "timeout",
   "signal": "SIGTERM",
   "signal_num": 15,
@@ -85,7 +86,7 @@ Command was killed because it exceeded the time limit.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 3) |
+| `schema_version` | integer | Schema version (currently 4) |
 | `status` | string | Always `"timeout"` |
 | `signal` | string | Signal sent to command (e.g., `"SIGTERM"`, `"SIGKILL"`) |
 | `signal_num` | integer | Signal number (e.g., 15 for SIGTERM, 9 for SIGKILL) |
@@ -103,7 +104,7 @@ When `--on-timeout` is specified, additional fields describe the hook execution:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "status": "timeout",
   "signal": "SIGTERM",
   "signal_num": 15,
@@ -128,13 +129,50 @@ When `--on-timeout` is specified, additional fields describe the hook execution:
 | `hook_timed_out` | boolean | Whether the hook exceeded `--on-timeout-limit` |
 | `hook_elapsed_ms` | integer | How long the hook ran in milliseconds |
 
+#### With --retry
+
+When `--retry N` is specified (N > 0), additional fields track retry attempts:
+
+```json
+{
+  "schema_version": 4,
+  "status": "completed",
+  "exit_code": 0,
+  "elapsed_ms": 45000,
+  "user_time_ms": 100,
+  "system_time_ms": 50,
+  "max_rss_kb": 8432,
+  "attempts": 3,
+  "attempt_results": [
+    {"status": "timeout", "exit_code": null, "elapsed_ms": 30000},
+    {"status": "timeout", "exit_code": null, "elapsed_ms": 30000},
+    {"status": "completed", "exit_code": 0, "elapsed_ms": 15000}
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `attempts` | integer | Total number of attempts made |
+| `attempt_results` | array | Per-attempt results (see below) |
+
+Each element in `attempt_results` contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | `"completed"`, `"timeout"`, or `"signal_forwarded"` |
+| `exit_code` | integer \| null | Exit code for this attempt, or `null` if timed out |
+| `elapsed_ms` | integer | Duration of this attempt in milliseconds |
+
+**Note:** `attempts` and `attempt_results` fields are only present when `--retry N` is specified with N > 0.
+
 ### signal_forwarded
 
 timeout received a signal (e.g., from `docker stop`, `kill`, or Ctrl+C) and forwarded it to the child process.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "status": "signal_forwarded",
   "signal": "SIGTERM",
   "signal_num": 15,
@@ -149,7 +187,7 @@ timeout received a signal (e.g., from `docker stop`, `kill`, or Ctrl+C) and forw
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 3) |
+| `schema_version` | integer | Schema version (currently 4) |
 | `status` | string | Always `"signal_forwarded"` |
 | `signal` | string | Signal that was forwarded |
 | `signal_num` | integer | Signal number |
@@ -166,7 +204,7 @@ timeout itself encountered an error.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "status": "error",
   "error": "command not found: nonexistent_cmd",
   "exit_code": 127,
@@ -176,7 +214,7 @@ timeout itself encountered an error.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 3) |
+| `schema_version` | integer | Schema version (currently 4) |
 | `status` | string | Always `"error"` |
 | `error` | string | Human-readable error message |
 | `exit_code` | integer | Exit code (125=internal error, 126=not executable, 127=not found) |

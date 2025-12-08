@@ -159,6 +159,72 @@ else
 fi
 
 # ============================================================================
+echo -e "${YELLOW}7. JSON Output Overhead${NC}"
+echo "   Does --json add latency?"
+echo ""
+# ============================================================================
+
+echo -e "${CYAN}Plain vs JSON output:${NC}"
+hyperfine --warmup 10 -N --runs 30 \
+    -n "plain" "$TIMEOUT_BIN 60 true" \
+    -n "json" "$TIMEOUT_BIN --json 60 true"
+echo ""
+
+# ============================================================================
+echo -e "${YELLOW}8. Verbose Mode Overhead${NC}"
+echo "   Does -v add latency?"
+echo ""
+# ============================================================================
+
+echo -e "${CYAN}100ms timeout, quiet vs verbose:${NC}"
+hyperfine --warmup 5 -N -i --runs 15 \
+    -n "quiet" "$TIMEOUT_BIN 0.1 sleep 10" \
+    -n "verbose" "$TIMEOUT_BIN -v 0.1 sleep 10"
+echo ""
+
+# ============================================================================
+echo -e "${YELLOW}9. Retry Feature${NC}"
+echo "   Overhead and timing for --retry, --retry-delay, --retry-backoff"
+echo ""
+# ============================================================================
+
+echo -e "${CYAN}Retry flag overhead (no retry triggered):${NC}"
+hyperfine --warmup 10 -N --runs 30 \
+    -n "no retry" "$TIMEOUT_BIN 60 true" \
+    -n "with --retry 3" "$TIMEOUT_BIN --retry 3 60 true"
+echo ""
+
+echo -e "${CYAN}Retry delay precision (100ms timeout + 200ms delay):${NC}"
+# Create temp file for retry test
+rm -f /tmp/bench_retry_sh
+echo "Testing single retry with delay..."
+start_time=$(python3 -c 'import time; print(time.time())')
+$TIMEOUT_BIN --retry 1 --retry-delay 0.2 0.1 sh -c '[ -f /tmp/bench_retry_sh ] && exit 0; touch /tmp/bench_retry_sh; sleep 10' || true
+end_time=$(python3 -c 'import time; print(time.time())')
+elapsed=$(python3 -c "print(f'{($end_time - $start_time)*1000:.0f}ms')")
+rm -f /tmp/bench_retry_sh
+echo "  Elapsed: $elapsed (target: ~300ms = 100ms timeout + 200ms delay)"
+echo ""
+
+echo -e "${CYAN}Backoff timing (50ms timeout, 50ms delay, 2x backoff, 2 retries):${NC}"
+rm -f /tmp/bench_backoff_1 /tmp/bench_backoff_2
+echo "Testing exponential backoff..."
+start_time=$(python3 -c 'import time; print(time.time())')
+$TIMEOUT_BIN --retry 2 --retry-delay 50ms --retry-backoff 2x 50ms sh -c \
+    'if [ -f /tmp/bench_backoff_2 ]; then exit 0; elif [ -f /tmp/bench_backoff_1 ]; then touch /tmp/bench_backoff_2; sleep 10; else touch /tmp/bench_backoff_1; sleep 10; fi' || true
+end_time=$(python3 -c 'import time; print(time.time())')
+elapsed=$(python3 -c "print(f'{($end_time - $start_time)*1000:.0f}ms')")
+rm -f /tmp/bench_backoff_1 /tmp/bench_backoff_2
+echo "  Elapsed: $elapsed (target: ~250ms = 50ms + 50ms delay + 50ms + 100ms delay)"
+echo ""
+
+echo -e "${CYAN}Multiple retry attempts (3 retries, all timeout):${NC}"
+hyperfine --warmup 2 -N -i --runs 10 \
+    -n "single attempt" "$TIMEOUT_BIN 50ms sleep 60" \
+    -n "3 retries (all fail)" "$TIMEOUT_BIN --retry 2 50ms sleep 60"
+echo ""
+
+# ============================================================================
 echo -e "${BLUE}=== Summary ===${NC}"
 echo ""
 # ============================================================================
