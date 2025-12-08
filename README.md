@@ -1,7 +1,7 @@
 darwin-timeout
 ==============
 
-GNU `timeout` for macOS, done right. Works through sleep. 83KB. Zero dependencies.
+GNU `timeout` for macOS, done right. Works through sleep. 100KB. Zero dependencies.
 
     brew install denispol/tap/darwin-timeout
 
@@ -16,6 +16,7 @@ Plus features GNU doesn't have:
     timeout --json 5m ./test-suite       # JSON output for CI
     timeout -c active 1h ./benchmark     # pause timer during sleep (GNU behavior)
     timeout --on-timeout 'cleanup.sh' 30s ./task  # pre-timeout hook
+    timeout --retry 3 30s ./flaky-test   # retry on timeout
 
 **Coming from GNU coreutils?** darwin-timeout defaults to wall-clock time (survives sleep). Use `-c active` for GNU-like behavior where the timer pauses during sleep.
 
@@ -56,13 +57,16 @@ GNU timeout:    ██████████ ......paused...... ████�
 | Works during system sleep | ✓              | ✗             |
 | Selectable time mode      | ✓ (wall/active)| ✗ (active only)|
 | JSON output               | ✓              | ✗             |
+| Retry on timeout          | ✓              | ✗             |
 | Pre-timeout hooks         | ✓              | ✗             |
 | Wait-for-file             | ✓              | ✗             |
 | Custom exit codes         | ✓              | ✗             |
 | Env var configuration     | ✓              | ✗             |
-| Binary size               | 83KB           | 15.7MB        |
-| Startup time              | 4.1ms          | 4.9ms         |
+| Binary size               | 100KB          | 15.7MB        |
+| Startup time              | 3.6ms          | 4.2ms         |
 | Zero CPU while waiting    | ✓ (kqueue)     | ✓ (nanosleep) |
+
+*Performance data from [250 benchmark runs](#benchmarks) on Apple M4 Pro.*
 
 100% GNU-compatible. All flags work identically (`-s`, `-k`, `-p`, `-f`, `-v`). Drop-in replacement for Apple Silicon and Intel Macs.
 
@@ -136,6 +140,9 @@ Options
     --timeout-exit-code N    exit with N instead of 124 on timeout
     --wait-for-file PATH     wait for file to exist before starting command
     --wait-for-file-timeout T  timeout for --wait-for-file (default: wait forever)
+    -r, --retry N            retry command up to N times on timeout
+    --retry-delay T          delay between retries (default: 0)
+    --retry-backoff Nx       multiply delay by N each retry (e.g., 2x)
 
 **Duration format:** number with optional suffix `ms` (milliseconds), `us`/`µs` (microseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Fractional values supported: `0.5s`, `1.5ms`, `100us`.
 
@@ -168,10 +175,10 @@ JSON Output
 Machine-readable output for CI/CD pipelines and automation:
 
     $ timeout --json 1s sleep 0.5
-    {"schema_version":3,"status":"completed","exit_code":0,"elapsed_ms":504,"user_time_ms":1,"system_time_ms":2,"max_rss_kb":1248}
+    {"schema_version":4,"status":"completed","exit_code":0,"elapsed_ms":504,"user_time_ms":1,"system_time_ms":2,"max_rss_kb":1248}
 
     $ timeout --json 0.5s sleep 10
-    {"schema_version":3,"status":"timeout","signal":"SIGTERM","signal_num":15,"killed":false,"command_exit_code":-1,"exit_code":124,"elapsed_ms":502,"user_time_ms":0,"system_time_ms":1,"max_rss_kb":1232}
+    {"schema_version":4,"status":"timeout","signal":"SIGTERM","signal_num":15,"killed":false,"command_exit_code":-1,"exit_code":124,"elapsed_ms":502,"user_time_ms":0,"system_time_ms":1,"max_rss_kb":1232}
 
 **Status types:** `completed`, `timeout`, `signal_forwarded`, `error`
 
@@ -187,6 +194,7 @@ Configure defaults without CLI flags:
     TIMEOUT                       default duration if CLI arg isn't a valid duration
     TIMEOUT_SIGNAL                default signal (overridden by -s)
     TIMEOUT_KILL_AFTER            default kill-after (overridden by -k)
+    TIMEOUT_RETRY                 default retry count (overridden by -r/--retry)
     TIMEOUT_WAIT_FOR_FILE         default file to wait for
     TIMEOUT_WAIT_FOR_FILE_TIMEOUT timeout for wait-for-file
 
@@ -209,30 +217,36 @@ Built on Darwin kernel primitives:
 - **mach_continuous_time**: wall-clock that survives system sleep (the key differentiator)
 - **CLOCK_MONOTONIC_RAW**: active-time clock, pauses during sleep
 - **posix_spawn**: lightweight process creation (faster than fork+exec)
-- **Signal forwarding**: SIGTERM/SIGINT/SIGHUP forwarded to child process group
+- **Signal forwarding**: SIGTERM/SIGINT/SIGHUP/SIGQUIT/SIGUSR1/SIGUSR2 forwarded to child process group
 - **Process groups**: child runs in own group so signals reach all descendants
 
-83KB `no_std` binary. Custom allocator, direct syscalls, no libstd runtime.
+100KB `no_std` binary. Custom allocator, direct syscalls, no libstd runtime.
 
 Benchmarks
 ----------
 
 All benchmarks on Apple M4 Pro, macOS Tahoe 26.2, hyperfine 1.20.0.
+See [docs/benchmarks/](docs/benchmarks/) for raw data and methodology.
 
     # Binary size
-    darwin-timeout: 83KB
-    GNU coreutils:  15.7MB (185x larger)
+    darwin-timeout: 100KB
+    GNU coreutils:  15.7MB (157x larger)
 
-    # Startup overhead (100 runs)
-    darwin-timeout: 4.1ms ± 0.4ms
-    GNU timeout:    4.9ms ± 0.7ms (20% slower)
+    # Startup overhead (250 runs across 5 sessions)
+    darwin-timeout: 3.6ms ± 0.2ms
+    GNU timeout:    4.2ms ± 0.2ms (18% slower)
 
-    # Timeout precision (50 runs, 1s timeout)
-    darwin-timeout: 1.017s ± 0.003s
-    GNU timeout:    1.017s ± 0.003s (identical)
+    # Timeout precision (20 runs, 1s timeout)
+    darwin-timeout: 1.014s ± 0.003s
+    GNU timeout:    1.017s ± 0.001s (identical)
 
     # CPU while waiting
     darwin-timeout: 0.00 user, 0.00 sys (kqueue blocks)
+
+    # Feature overhead (vs baseline)
+    --json flag:    0% overhead
+    --verbose flag: 0% overhead
+    --retry flag:   0% overhead (when not triggered)
 
 Development
 -----------
