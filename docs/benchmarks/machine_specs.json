@@ -1,0 +1,53 @@
+{
+  "timestamp": "2025-12-08T14:44:49Z",
+  "os": {
+    "buildID": "25C5048a",
+    "codename": "Tahoe",
+    "id": "macos",
+    "idLike": "",
+    "name": "macOS",
+    "prettyName": "macOS Tahoe 26.2 (25C5048a)",
+    "variant": "",
+    "variantID": "",
+    "version": "26.2",
+    "versionID": "26.2"
+  },
+  "host": {
+    "family": "Mac16,7",
+    "name": "MacBook Pro (16-inch, 2024, Three Thunderbolt 5 ports)",
+    "version": "",
+    "sku": "",
+    "vendor": "Apple Inc.",
+    "serial": "CYQRHYXQY6",
+    "uuid": "C9A02A40-B508-517B-B621-C3903A1D3DA3"
+  },
+  "kernel": {
+    "architecture": "arm64",
+    "name": "Darwin",
+    "release": "25.2.0",
+    "version": "Darwin Kernel Version 25.2.0: Thu Nov 13 23:35:49 PST 2025; root:xnu-12377.61.11~7/RELEASE_ARM64_T6041",
+    "pageSize": 16384
+  },
+  "cpu": {
+    "cpu": "Apple M4 Pro",
+    "vendor": "Apple",
+    "packages": 1,
+    "cores": {
+      "physical": 14,
+      "logical": 14,
+      "online": 14
+    },
+    "frequency": {
+      "base": 0,
+      "max": 4512
+    },
+    "coreTypes": [],
+    "temperature": null,
+    "march": "ARMv9.3-A",
+    "numaNodes": null
+  },
+  "memory": {
+    "total": 25769803776,
+    "used": 10718609408
+  }
+}
