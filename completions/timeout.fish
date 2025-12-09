@@ -28,6 +28,7 @@ complete -c timeout -l wait-for-file-timeout -d 'Timeout for wait-for-file' -xa 
 complete -c timeout -s r -l retry -d 'Retry command N times on timeout' -xa '1 2 3 5 10'
 complete -c timeout -l retry-delay -d 'Delay between retries' -xa "$durations"
 complete -c timeout -l retry-backoff -d 'Multiply delay by N each retry' -xa '2x 3x 4x'
+complete -c timeout -s H -l heartbeat -d 'Print status to stderr at interval' -xa "$durations"
 complete -c timeout -l json -d 'Output JSON for scripting'
 
 # First positional argument: duration

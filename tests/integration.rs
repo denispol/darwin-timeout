@@ -2236,3 +2236,207 @@ fn test_retry_does_not_retry_on_success() {
         stdout
     );
 }
+
+/* =========================================================================
+ * HEARTBEAT - CI keep-alive feature
+ * ========================================================================= */
+
+#[test]
+fn test_heartbeat_prints_status() {
+    /*
+     * --heartbeat should print status messages to stderr at regular intervals
+     */
+    let output = timeout_cmd()
+        .args(["--heartbeat", "500ms", "2s", "sleep", "10"])
+        .output()
+        .expect("failed to run command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    /* Should have at least 2 heartbeat messages (at 500ms and 1s) */
+    assert!(
+        stderr.contains("timeout: heartbeat:"),
+        "should print heartbeat messages: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("elapsed, command still running"),
+        "heartbeat should include elapsed time: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("pid"),
+        "heartbeat should include pid: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_heartbeat_short_flag() {
+    /*
+     * -H should work as short form of --heartbeat
+     */
+    let output = timeout_cmd()
+        .args(["-H", "500ms", "1.5s", "sleep", "10"])
+        .output()
+        .expect("failed to run command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("timeout: heartbeat:"),
+        "-H should enable heartbeat: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_heartbeat_quiet_suppresses() {
+    /*
+     * --quiet should suppress heartbeat messages
+     */
+    let output = timeout_cmd()
+        .args(["--quiet", "--heartbeat", "200ms", "1s", "sleep", "10"])
+        .output()
+        .expect("failed to run command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("heartbeat"),
+        "--quiet should suppress heartbeat: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_heartbeat_no_output_before_interval() {
+    /*
+     * No heartbeat should print if command completes before first interval
+     */
+    let output = timeout_cmd()
+        .args(["--heartbeat", "5s", "10s", "echo", "quick"])
+        .output()
+        .expect("failed to run command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stderr.contains("heartbeat"),
+        "no heartbeat before interval: {}",
+        stderr
+    );
+    assert!(
+        stdout.contains("quick"),
+        "command should complete: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_heartbeat_env_var() {
+    /*
+     * TIMEOUT_HEARTBEAT env var should set default heartbeat interval
+     */
+    let output = timeout_cmd()
+        .env("TIMEOUT_HEARTBEAT", "500ms")
+        .args(["1.5s", "sleep", "10"])
+        .output()
+        .expect("failed to run command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("timeout: heartbeat:"),
+        "env var should enable heartbeat: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_heartbeat_cli_overrides_env() {
+    /*
+     * CLI --heartbeat should override TIMEOUT_HEARTBEAT env var
+     */
+    let output = timeout_cmd()
+        .env("TIMEOUT_HEARTBEAT", "100ms") /* would produce many messages */
+        .args(["--heartbeat", "2s", "1s", "sleep", "10"]) /* only 1s timeout, no heartbeat */
+        .output()
+        .expect("failed to run command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    /* With 2s heartbeat and 1s timeout, no heartbeat should print */
+    assert!(
+        !stderr.contains("heartbeat"),
+        "CLI should override env var (2s interval > 1s timeout): {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_heartbeat_with_json() {
+    /*
+     * Heartbeat should work alongside JSON output
+     */
+    let output = timeout_cmd()
+        .args(["--json", "--heartbeat", "500ms", "1.5s", "sleep", "10"])
+        .output()
+        .expect("failed to run command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    /* Heartbeat goes to stderr */
+    assert!(
+        stderr.contains("timeout: heartbeat:"),
+        "heartbeat should go to stderr: {}",
+        stderr
+    );
+    /* JSON goes to stdout */
+    assert!(
+        stdout.contains(r#""status":"timeout""#),
+        "JSON should go to stdout: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_heartbeat_elapsed_time_format() {
+    /*
+     * Heartbeat should show elapsed time in human-readable format
+     */
+    let output = timeout_cmd()
+        .args(["--heartbeat", "500ms", "1.5s", "sleep", "10"])
+        .output()
+        .expect("failed to run command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    /* Should show seconds (e.g., "1s elapsed") */
+    assert!(
+        stderr.contains("s elapsed"),
+        "should show elapsed seconds: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_heartbeat_with_confine_active() {
+    /*
+     * Heartbeat should work with --confine active
+     */
+    let output = timeout_cmd()
+        .args([
+            "--confine",
+            "active",
+            "--heartbeat",
+            "500ms",
+            "1.5s",
+            "sleep",
+            "10",
+        ])
+        .output()
+        .expect("failed to run command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("timeout: heartbeat:"),
+        "heartbeat should work with confine active: {}",
+        stderr
+    );
+}

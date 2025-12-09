@@ -704,6 +704,50 @@ fn bench_verbose_overhead() {
 }
 
 /* =========================================================================
+ * HEARTBEAT FLAG - Overhead when enabled but not firing
+ * ========================================================================= */
+
+#[test]
+fn bench_heartbeat_overhead() {
+    /*
+     * --heartbeat should add negligible overhead when configured
+     * but not yet firing (long interval, short command).
+     */
+    let iterations = 10;
+
+    /* Without heartbeat */
+    let no_hb_start = Instant::now();
+    for _ in 0..iterations {
+        timeout_cmd().args(["60s", "true"]).assert().success();
+    }
+    let no_hb_time = no_hb_start.elapsed() / iterations;
+
+    /* With heartbeat (but won't fire - 60s interval, instant command) */
+    let hb_start = Instant::now();
+    for _ in 0..iterations {
+        timeout_cmd()
+            .args(["--heartbeat", "60s", "60s", "true"])
+            .assert()
+            .success();
+    }
+    let hb_time = hb_start.elapsed() / iterations;
+
+    let overhead = hb_time.saturating_sub(no_hb_time);
+
+    println!(
+        "Without heartbeat: {:?}, With heartbeat: {:?}, Overhead: {:?}",
+        no_hb_time, hb_time, overhead
+    );
+
+    /* heartbeat flag setup should add minimal overhead */
+    assert!(
+        overhead < Duration::from_millis(50),
+        "heartbeat overhead too high: {:?}",
+        overhead
+    );
+}
+
+/* =========================================================================
  * CONFINE MODES - Wall vs Active clock overhead
  * ========================================================================= */
 
