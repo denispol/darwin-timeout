@@ -138,6 +138,7 @@ pub struct Args<'a> {
     pub retry: Option<ArgValue<'a>>,
     pub retry_delay: Option<ArgValue<'a>>,
     pub retry_backoff: Option<ArgValue<'a>>,
+    pub heartbeat: Option<ArgValue<'a>>,
     pub duration: Option<ArgValue<'a>>,
     pub command: Option<ArgValue<'a>>,
     pub args: Vec<ArgValue<'a>>,
@@ -162,6 +163,7 @@ pub struct OwnedArgs {
     pub retry: Option<String>,
     pub retry_delay: Option<String>,
     pub retry_backoff: Option<String>,
+    pub heartbeat: Option<String>,
     pub duration: Option<String>,
     pub command: Option<String>,
     pub args: Vec<String>,
@@ -187,6 +189,7 @@ impl<'a> Args<'a> {
             retry: self.retry.map(|v| v.into_owned()),
             retry_delay: self.retry_delay.map(|v| v.into_owned()),
             retry_backoff: self.retry_backoff.map(|v| v.into_owned()),
+            heartbeat: self.heartbeat.map(|v| v.into_owned()),
             duration: self.duration.map(|v| v.into_owned()),
             command: self.command.map(|v| v.into_owned()),
             args: self.args.into_iter().map(|v| v.into_owned()).collect(),
@@ -231,6 +234,9 @@ pub fn parse_args() -> Result<OwnedArgs, ParseError> {
     }
     if owned.retry.is_none() {
         owned.retry = get_env(b"TIMEOUT_RETRY\0").filter(|s| !s.is_empty());
+    }
+    if owned.heartbeat.is_none() {
+        owned.heartbeat = get_env(b"TIMEOUT_HEARTBEAT\0");
     }
 
     Ok(owned)
@@ -445,6 +451,26 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                 result.retry_backoff = Some(ArgValue::Borrowed(&s[16..]));
             }
 
+            "-H" => {
+                i += 1;
+                result.heartbeat = Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                    ParseError {
+                        message: "-H requires a duration".to_string(),
+                    }
+                })?));
+            }
+            "--heartbeat" => {
+                i += 1;
+                result.heartbeat = Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                    ParseError {
+                        message: "--heartbeat requires a duration".to_string(),
+                    }
+                })?));
+            }
+            s if s.starts_with("--heartbeat=") => {
+                result.heartbeat = Some(ArgValue::Borrowed(&s[12..]));
+            }
+
             /* unknown long option */
             s if s.starts_with("--") => {
                 return Err(ParseError {
@@ -556,6 +582,21 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                                         })?));
                                 }
                             }
+                            b'H' => {
+                                if j + 1 < bytes.len() {
+                                    result.heartbeat =
+                                        Some(ArgValue::Owned(s[j + 1..].to_string()));
+                                    break;
+                                } else {
+                                    i += 1;
+                                    result.heartbeat =
+                                        Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                                            ParseError {
+                                                message: "-H requires a duration".to_string(),
+                                            }
+                                        })?));
+                                }
+                            }
                             c => {
                                 return Err(ParseError {
                                     message: format!("unknown option: -{}", c as char),
@@ -653,6 +694,8 @@ Options:
   -r, --retry <N>                 Retry command up to N times on timeout [env: TIMEOUT_RETRY]
       --retry-delay <DURATION>    Delay between retries [default: 0]
       --retry-backoff <Nx>        Multiply delay by N each retry (e.g., 2x for exponential)
+  -H, --heartbeat <DURATION>      Print status to stderr at regular intervals (for CI)
+                                  [env: TIMEOUT_HEARTBEAT]
       --json                      Output result as JSON (for scripting/CI)
   -h, --help                      Print help
   -V, --version                   Print version
@@ -671,6 +714,7 @@ Environment:
   TIMEOUT_SIGNAL  Default signal (overridden by -s)
   TIMEOUT_KILL_AFTER  Default kill-after duration (overridden by -k)
   TIMEOUT_RETRY   Default retry count (overridden by -r/--retry)
+  TIMEOUT_HEARTBEAT  Default heartbeat interval (overridden by -H/--heartbeat)
   TIMEOUT_WAIT_FOR_FILE  Default file to wait for
   TIMEOUT_WAIT_FOR_FILE_TIMEOUT  Default timeout for wait-for-file
 "#,
@@ -1066,5 +1110,55 @@ mod tests {
         assert_eq!(args.retry, Some("3".to_string()));
         assert_eq!(args.retry_delay, Some("1s".to_string()));
         assert_eq!(args.signal, "INT");
+    }
+
+    /* heartbeat argument tests */
+
+    #[test]
+    fn test_heartbeat_long_flag() {
+        let args = try_parse_from(["timeout", "--heartbeat", "60s", "5s", "cmd"]).unwrap();
+        assert_eq!(args.heartbeat, Some("60s".to_string()));
+    }
+
+    #[test]
+    fn test_heartbeat_short_flag() {
+        let args = try_parse_from(["timeout", "-H", "30s", "5s", "cmd"]).unwrap();
+        assert_eq!(args.heartbeat, Some("30s".to_string()));
+    }
+
+    #[test]
+    fn test_heartbeat_equals_syntax() {
+        let args = try_parse_from(["timeout", "--heartbeat=1m", "5s", "cmd"]).unwrap();
+        assert_eq!(args.heartbeat, Some("1m".to_string()));
+    }
+
+    #[test]
+    fn test_heartbeat_missing_duration() {
+        let result = try_parse_from(["timeout", "--heartbeat"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("requires a duration"));
+    }
+
+    #[test]
+    fn test_heartbeat_short_flag_missing_duration() {
+        let result = try_parse_from(["timeout", "-H"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("requires a duration"));
+    }
+
+    #[test]
+    fn test_heartbeat_combined_with_other_flags() {
+        let args =
+            try_parse_from(["timeout", "-v", "--json", "--heartbeat", "60s", "5m", "cmd"]).unwrap();
+        assert!(args.verbose);
+        assert!(args.json);
+        assert_eq!(args.heartbeat, Some("60s".to_string()));
+        assert_eq!(args.duration, Some("5m".to_string()));
+    }
+
+    #[test]
+    fn test_heartbeat_short_flag_embedded() {
+        let args = try_parse_from(["timeout", "-H30s", "5s", "cmd"]).unwrap();
+        assert_eq!(args.heartbeat, Some("30s".to_string()));
     }
 }

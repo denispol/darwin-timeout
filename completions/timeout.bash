@@ -15,7 +15,7 @@ _timeout_completions() {
             COMPREPLY=($(compgen -W "$signals" -- "$cur"))
             return 0
             ;;
-        -k|--kill-after|--on-timeout-limit|--wait-for-file-timeout|--retry-delay)
+        -k|--kill-after|--on-timeout-limit|--wait-for-file-timeout|--retry-delay|-H|--heartbeat)
             # Duration suffixes
             COMPREPLY=($(compgen -W "1s 5s 10s 30s 1m 5m" -- "$cur"))
             return 0
@@ -55,7 +55,7 @@ _timeout_completions() {
         opts="-s --signal -k --kill-after -p --preserve-status -f --foreground"
         opts="$opts -v --verbose -q --quiet -c --confine --timeout-exit-code --on-timeout"
         opts="$opts --on-timeout-limit --wait-for-file --wait-for-file-timeout"
-        opts="$opts -r --retry --retry-delay --retry-backoff --json -h --help -V --version"
+        opts="$opts -r --retry --retry-delay --retry-backoff -H --heartbeat --json -h --help -V --version"
         COMPREPLY=($(compgen -W "$opts" -- "$cur"))
         return 0
     fi

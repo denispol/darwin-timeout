@@ -510,6 +510,7 @@ pub struct RunConfig {
     pub retry_count: u32,             /* number of retries on timeout (0 = no retry) */
     pub retry_delay: Duration,        /* delay between retries */
     pub retry_backoff: u32,           /* multiplier for delay each retry (1 = no backoff) */
+    pub heartbeat: Option<Duration>,  /* print status to stderr at this interval */
 }
 
 impl RunConfig {
@@ -560,6 +561,13 @@ impl RunConfig {
             .unwrap_or(1)
             .max(1);
 
+        /* parse heartbeat interval */
+        let heartbeat = args
+            .heartbeat
+            .as_ref()
+            .map(|s| parse_duration(s))
+            .transpose()?;
+
         /* Warn if on-timeout-limit exceeds main timeout (when hook is set) */
         if args.on_timeout.is_some() && on_timeout_limit > timeout && !is_no_timeout(&timeout) {
             crate::eprintln!(
@@ -583,6 +591,7 @@ impl RunConfig {
             retry_count,
             retry_delay,
             retry_backoff,
+            heartbeat,
         })
     }
 }
@@ -747,8 +756,23 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
     #[allow(clippy::cast_possible_wrap)]
     let pid = child.id() as i32;
 
+    /* build heartbeat config if enabled */
+    let heartbeat_config = if let Some(interval) = config.heartbeat {
+        /* get start time outside closure so errors propagate */
+        let start_ns = precise_now_ns(config.confine)?;
+        Some(HeartbeatConfig {
+            interval_ns: duration_to_ns(interval),
+            quiet: config.quiet,
+            pid,
+            start_ns,
+        })
+    } else {
+        None
+    };
+
     /* wait for exit or timeout */
-    let exit_result = wait_with_kqueue(child, pid, config.timeout, config.confine)?;
+    let exit_result =
+        wait_with_kqueue(child, pid, config.timeout, config.confine, heartbeat_config)?;
 
     match exit_result {
         WaitResult::Exited(status, rusage) => {
@@ -792,7 +816,8 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
 
     /* if --kill-after, give it a grace period then escalate to SIGKILL */
     if let Some(kill_after) = config.kill_after {
-        let grace_result = wait_with_kqueue(child, pid, kill_after, config.confine)?;
+        /* no heartbeat during grace period */
+        let grace_result = wait_with_kqueue(child, pid, kill_after, config.confine, None)?;
 
         match grace_result {
             WaitResult::Exited(status, rusage) => {
@@ -870,6 +895,37 @@ enum WaitResult {
     ReceivedSignal(Signal),
 }
 
+/* heartbeat config for wait_with_kqueue */
+struct HeartbeatConfig {
+    interval_ns: u64, /* heartbeat interval in nanoseconds, 0 = disabled */
+    quiet: bool,      /* suppress output */
+    pid: i32,         /* child pid for message */
+    start_ns: u64,    /* when we started, for elapsed calculation */
+}
+
+/* print heartbeat status message to stderr */
+/* format elapsed time as "Xm Ys" or "Xs" - integer math only, no floats */
+fn print_heartbeat(elapsed_ns: u64, pid: i32) {
+    let elapsed_secs = elapsed_ns / 1_000_000_000;
+    let mins = elapsed_secs / 60;
+    let secs = elapsed_secs % 60;
+
+    if mins > 0 {
+        crate::eprintln!(
+            "timeout: heartbeat: {}m {}s elapsed, command still running (pid {})",
+            mins,
+            secs,
+            pid
+        );
+    } else {
+        crate::eprintln!(
+            "timeout: heartbeat: {}s elapsed, command still running (pid {})",
+            secs,
+            pid
+        );
+    }
+}
+
 /* get errno - on macOS this is a thread-local via __error() */
 #[inline]
 fn errno() -> i32 {
@@ -888,15 +944,27 @@ fn errno() -> i32 {
  * wait using kqueue - EVFILT_PROC for exit, EVFILT_TIMER with NOTE_NSECONDS
  * for nanosecond precision, and optionally EVFILT_READ for signal pipe.
  * Direct libc because nix kqueue API keeps changing.
+ *
+ * With heartbeat: wakes at min(remaining_timeout, next_heartbeat), prints
+ * status message on heartbeat intervals, continues waiting until timeout.
  */
 fn wait_with_kqueue(
     child: &mut RawChild,
     pid: i32,
     timeout: Duration,
     confine: Confine,
+    heartbeat: Option<HeartbeatConfig>,
 ) -> Result<WaitResult> {
     let start_ns = precise_now_ns(confine)?;
     let timeout_ns = duration_to_ns(timeout);
+
+    /* heartbeat tracking: next heartbeat fires at start_ns + interval, then every interval */
+    let heartbeat_interval_ns = heartbeat.as_ref().map_or(0, |h| h.interval_ns);
+    let mut next_heartbeat_ns = if heartbeat_interval_ns > 0 {
+        start_ns.saturating_add(heartbeat_interval_ns)
+    } else {
+        u64::MAX /* disabled */
+    };
 
     /* Get signal pipe fd if available */
     let signal_fd = {
@@ -975,6 +1043,7 @@ fn wait_with_kqueue(
      * ESRCH: process already dead, just reap it.
      *
      * No timeout arg to kevent, the timer filter handles it.
+     * With heartbeat: timer fires at min(remaining_timeout, time_to_next_heartbeat).
      */
     let deadline_ns = start_ns.saturating_add(timeout_ns);
 
@@ -988,10 +1057,14 @@ fn wait_with_kqueue(
         }
         let remaining_ns = deadline_ns.saturating_sub(now_ns);
 
-        /* update timer */
+        /* calculate next wake time: min(remaining timeout, time to next heartbeat) */
+        let time_to_heartbeat = next_heartbeat_ns.saturating_sub(now_ns);
+        let next_wake_ns = remaining_ns.min(time_to_heartbeat);
+
+        /* update timer to next wake time */
         #[allow(clippy::cast_possible_wrap)]
         {
-            changes[1].data = remaining_ns.min(MAX_TIMER_NS) as isize;
+            changes[1].data = next_wake_ns.min(MAX_TIMER_NS) as isize;
         }
 
         // SAFETY: kq is a valid kqueue fd. changes is a valid slice of kevent structs.
@@ -1044,7 +1117,26 @@ fn wait_with_kqueue(
             )));
         }
 
-        /* got result, exit loop */
+        /* got an event - check if it's a heartbeat tick or something else */
+        if event.filter == libc::EVFILT_TIMER && heartbeat_interval_ns > 0 {
+            let now_ns = precise_now_ns(confine)?;
+            /* heartbeat tick: we haven't reached deadline yet, timer fired for heartbeat */
+            if now_ns < deadline_ns && now_ns >= next_heartbeat_ns {
+                /* print heartbeat message */
+                if let Some(ref hb) = heartbeat
+                    && !hb.quiet
+                {
+                    let elapsed_ns = now_ns.saturating_sub(hb.start_ns);
+                    print_heartbeat(elapsed_ns, hb.pid);
+                }
+                /* schedule next heartbeat */
+                next_heartbeat_ns = now_ns.saturating_add(heartbeat_interval_ns);
+                /* re-register the timer for next wake (proc watcher is oneshot, re-add) */
+                changes[0].flags = libc::EV_ADD | libc::EV_ONESHOT;
+                continue;
+            }
+        }
+        /* got a non-heartbeat result, exit loop */
         break;
     }
 

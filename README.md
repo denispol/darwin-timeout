@@ -59,6 +59,7 @@ GNU timeout:    ██████████ ......paused...... ████�
 | JSON output               | ✓              | ✗             |
 | Retry on timeout          | ✓              | ✗             |
 | Pre-timeout hooks         | ✓              | ✗             |
+| CI heartbeat (keep-alive) | ✓              | ✗             |
 | Wait-for-file             | ✓              | ✗             |
 | Custom exit codes         | ✓              | ✗             |
 | Env var configuration     | ✓              | ✗             |
@@ -117,6 +118,14 @@ Use Cases
 
     timeout --wait-for-file /tmp/db-ready 5m ./migrate
 
+**CI keep-alive**: Many CI systems (GitHub Actions, GitLab CI, Travis) kill jobs that produce no output for 10-30 minutes. Long builds, test suites, or deployments can trigger this even when working correctly. The heartbeat flag prints periodic status messages to prevent these false timeouts:
+
+    timeout --heartbeat 60s 2h ./integration-tests
+    # every 60s: timeout: heartbeat: 5m 0s elapsed, command still running (pid 12345)
+
+    # combine with --json for structured CI output
+    timeout --heartbeat 30s --json 1h ./deploy.sh
+
 Options
 -------
 
@@ -134,6 +143,7 @@ Options
 
     -q, --quiet              suppress error messages
     -c, --confine MODE       time mode: 'wall' (default) or 'active'
+    -H, --heartbeat T        print status to stderr every T (for CI keep-alive)
     --json                   JSON output for scripting
     --on-timeout CMD         run CMD on timeout (before kill); %p = child PID
     --on-timeout-limit T     time limit for --on-timeout (default: 5s)
@@ -149,7 +159,7 @@ Options
 **Exit codes:**
 
     0       command completed successfully
-    124     timed out (or custom via --timeout-exit-code)
+    124     timed out, or --wait-for-file timed out (custom via --timeout-exit-code)
     125     timeout itself failed
     126     command found but not executable
     127     command not found
@@ -195,6 +205,7 @@ Configure defaults without CLI flags:
     TIMEOUT_SIGNAL                default signal (overridden by -s)
     TIMEOUT_KILL_AFTER            default kill-after (overridden by -k)
     TIMEOUT_RETRY                 default retry count (overridden by -r/--retry)
+    TIMEOUT_HEARTBEAT             default heartbeat interval (overridden by -H/--heartbeat)
     TIMEOUT_WAIT_FOR_FILE         default file to wait for
     TIMEOUT_WAIT_FOR_FILE_TIMEOUT timeout for wait-for-file
 
@@ -244,9 +255,10 @@ See [docs/benchmarks/](docs/benchmarks/) for raw data and methodology.
     darwin-timeout: 0.00 user, 0.00 sys (kqueue blocks)
 
     # Feature overhead (vs baseline)
-    --json flag:    0% overhead
-    --verbose flag: 0% overhead
-    --retry flag:   0% overhead (when not triggered)
+    --json flag:      0% overhead
+    --verbose flag:   0% overhead
+    --retry flag:     0% overhead (when not triggered)
+    --heartbeat flag: 0% overhead (prints only at intervals)
 
 Development
 -----------
