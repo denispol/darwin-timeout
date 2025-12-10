@@ -39,17 +39,19 @@ darwin-timeout uses `mach_continuous_time`, the only macOS clock that keeps tick
 **Scenario:** `timeout 1h ./build` with laptop sleeping 45min in the middle
 
 ```
-             0        15min                 1h                    1h 45min
-             ├──────────┼───────────────────┼───────────────────────┤
-   Real time │▓▓▓▓▓▓▓▓▓▓│░░░░░░░░░░░░░░░░░░░│▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│
-             │  awake   │       sleep       │         awake         │
-             └──────────┴───────────────────┴───────────────────────┘
+                0        15min                 1h                    1h 45min
+                ├──────────┬──────────────────────────────┬──────────────────────────────┤
+   Real time    │▓▓▓▓▓▓▓▓▓▓│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│
+                │  awake   │            sleep             │            awake             │
+                └──────────┴──────────────────────────────┴──────────────────────────────┘
 
-darwin-timeout: ██████████░░░░░░░░░░░░░░░░░░░██ ← fires at 1h ✓
-                         (counts sleep)
+darwin-timeout  |██████████|██████████████████████████████^ fires at 1h ✓
+                           (counts sleep time)
 
-GNU timeout:    ██████████ ......paused...... ██████████████████████████████ ← fires at 1h 45min ✗
-                         (waits for awake time)
+GNU timeout     |██████████|······························|██████████████████████████████^ fires at 1h 45min ✗
+                           (pauses during sleep)
+
+Legend: ▓ awake  ░ sleep  █ counting  · paused  ^ fire point
 ```
 
 |                           | darwin-timeout | GNU coreutils |
