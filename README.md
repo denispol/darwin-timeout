@@ -58,6 +58,7 @@ GNU timeout:    ██████████ ......paused...... ████�
 | Selectable time mode      | ✓ (wall/active)| ✗ (active only)|
 | JSON output               | ✓              | ✗             |
 | Retry on timeout          | ✓              | ✗             |
+| Stdin idle timeout        | ✓              | ✗             |
 | Pre-timeout hooks         | ✓              | ✗             |
 | CI heartbeat (keep-alive) | ✓              | ✗             |
 | Wait-for-file             | ✓              | ✗             |
@@ -118,6 +119,29 @@ Use Cases
 
     timeout --wait-for-file /tmp/db-ready 5m ./migrate
 
+**Prompt detection**: Kill commands that unexpectedly prompt for input. Catch interactive tests hanging on stdin in unattended CI environments.
+
+    timeout --stdin-timeout 5s ./test-suite  # fail if it prompts for input
+
+> **Note:** `--stdin-timeout` alone **consumes stdin data** to detect activity—the child won't receive it. This is ideal for detecting unexpected prompts in non-interactive CI.
+
+**Stream watchdog**: Detect stalled data pipelines without consuming the stream. If upstream stops sending data for too long, kill the pipeline. The child receives all data intact, which is perfect for production backup and log shipping pipelines.
+
+    # Database backup: kill if pg_dump stalls for 2+ minutes
+    # Protects against database locks, network issues, or hung queries
+    pg_dump mydb | timeout -S 2m --stdin-passthrough 4h gzip | \
+        aws s3 cp - s3://backups/db-$(date +%Y%m%d).sql.gz
+
+    # Kubernetes log shipping: fail if pod stops emitting logs for 30s
+    # Catches crashed pods, network issues, or stuck log tails
+    kubectl logs -f deployment/app --since=10m | \
+        timeout -S 30s --stdin-passthrough 24h ./ship-to-elasticsearch.sh
+
+    # Real-time data sync: abort if upstream stops sending for 5 minutes
+    nc data-source 9000 | timeout -S 5m --stdin-passthrough 48h ./process-stream.sh
+
+> **How it works:** The timer resets on every stdin activity. When stdin reaches EOF (closed pipe), monitoring stops and wall clock timeout takes over. Data flows to the child untouched.
+
 **CI keep-alive**: Many CI systems (GitHub Actions, GitLab CI, Travis) kill jobs that produce no output for 10-30 minutes. Long builds, test suites, or deployments can trigger this even when working correctly. The heartbeat flag prints periodic status messages to prevent these false timeouts:
 
     timeout --heartbeat 60s 2h ./integration-tests
@@ -153,6 +177,8 @@ Options
     -r, --retry N            retry command up to N times on timeout
     --retry-delay T          delay between retries (default: 0)
     --retry-backoff Nx       multiply delay by N each retry (e.g., 2x)
+    -S, --stdin-timeout T    kill command if stdin is idle for T (consumes stdin; for prompt detection)
+    --stdin-passthrough      non-consuming stdin idle detection (pair with -S)
 
 **Duration format:** number with optional suffix `ms` (milliseconds), `us`/`µs` (microseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Fractional values supported: `0.5s`, `1.5ms`, `100us`.
 
@@ -185,12 +211,14 @@ JSON Output
 Machine-readable output for CI/CD pipelines and automation:
 
     $ timeout --json 1s sleep 0.5
-    {"schema_version":4,"status":"completed","exit_code":0,"elapsed_ms":504,"user_time_ms":1,"system_time_ms":2,"max_rss_kb":1248}
+    {"schema_version":5,"status":"completed","exit_code":0,"elapsed_ms":504,"user_time_ms":1,"system_time_ms":2,"max_rss_kb":1248}
 
     $ timeout --json 0.5s sleep 10
-    {"schema_version":4,"status":"timeout","signal":"SIGTERM","signal_num":15,"killed":false,"command_exit_code":-1,"exit_code":124,"elapsed_ms":502,"user_time_ms":0,"system_time_ms":1,"max_rss_kb":1232}
+    {"schema_version":5,"status":"timeout","timeout_reason":"wall_clock","signal":"SIGTERM","signal_num":15,"killed":false,"command_exit_code":-1,"exit_code":124,"elapsed_ms":502,"user_time_ms":0,"system_time_ms":1,"max_rss_kb":1232}
 
 **Status types:** `completed`, `timeout`, `signal_forwarded`, `error`
+
+**Timeout reasons:** `wall_clock` (main timeout), `stdin_idle` (-S/--stdin-timeout)
 
 Includes resource usage metrics: CPU time (`user_time_ms`, `system_time_ms`) and peak memory (`max_rss_kb`).
 
@@ -206,6 +234,7 @@ Configure defaults without CLI flags:
     TIMEOUT_KILL_AFTER            default kill-after (overridden by -k)
     TIMEOUT_RETRY                 default retry count (overridden by -r/--retry)
     TIMEOUT_HEARTBEAT             default heartbeat interval (overridden by -H/--heartbeat)
+    TIMEOUT_STDIN_TIMEOUT         default stdin idle timeout (overridden by -S/--stdin-timeout)
     TIMEOUT_WAIT_FOR_FILE         default file to wait for
     TIMEOUT_WAIT_FOR_FILE_TIMEOUT timeout for wait-for-file
 

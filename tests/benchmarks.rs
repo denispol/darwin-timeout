@@ -838,3 +838,80 @@ fn bench_baseline_echo() {
         overhead
     );
 }
+
+/* =========================================================================
+ * STDIN TIMEOUT - Overhead when configured but not firing
+ * ========================================================================= */
+
+#[test]
+fn bench_stdin_timeout_overhead() {
+    /*
+     * --stdin-timeout should add negligible overhead when configured
+     * but not yet firing (command exits before stdin timeout).
+     */
+    let iterations = 10;
+
+    /* Without stdin-timeout */
+    let no_stdin_start = Instant::now();
+    for _ in 0..iterations {
+        timeout_cmd().args(["60s", "true"]).assert().success();
+    }
+    let no_stdin_time = no_stdin_start.elapsed() / iterations;
+
+    /* With stdin-timeout (but won't fire - instant command) */
+    let stdin_start = Instant::now();
+    for _ in 0..iterations {
+        timeout_cmd()
+            .args(["--stdin-timeout", "60s", "60s", "true"])
+            .assert()
+            .success();
+    }
+    let stdin_time = stdin_start.elapsed() / iterations;
+
+    let overhead = stdin_time.saturating_sub(no_stdin_time);
+
+    println!(
+        "Without stdin-timeout: {:?}, With stdin-timeout: {:?}, Overhead: {:?}",
+        no_stdin_time, stdin_time, overhead
+    );
+
+    /* stdin-timeout flag setup should add minimal overhead */
+    assert!(
+        overhead < Duration::from_millis(100),
+        "stdin-timeout overhead too high: {:?}",
+        overhead
+    );
+}
+
+#[test]
+fn bench_stdin_timeout_triggers() {
+    /*
+     * stdin-timeout should trigger at roughly the specified duration.
+     * Using stdin(Stdio::piped()) creates a pipe that blocks (no EOF).
+     */
+    use std::process::Stdio;
+    let target = Duration::from_millis(100);
+    let max_allowed = Duration::from_millis(500);
+
+    let start = Instant::now();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["--stdin-timeout", "100ms", "60s", "sleep", "60"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take(); /* keep pipe open */
+    let status = child.wait().expect("failed to wait");
+    let elapsed = start.elapsed();
+
+    assert_eq!(status.code(), Some(124), "should exit 124 on stdin timeout");
+
+    println!("Stdin timeout timing: {:?} (target: {:?})", elapsed, target);
+
+    assert!(elapsed >= target, "stdin timeout too fast: {:?}", elapsed);
+    assert!(
+        elapsed < max_allowed,
+        "stdin timeout too slow: {:?}",
+        elapsed
+    );
+}

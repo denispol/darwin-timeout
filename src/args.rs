@@ -139,6 +139,8 @@ pub struct Args<'a> {
     pub retry_delay: Option<ArgValue<'a>>,
     pub retry_backoff: Option<ArgValue<'a>>,
     pub heartbeat: Option<ArgValue<'a>>,
+    pub stdin_timeout: Option<ArgValue<'a>>,
+    pub stdin_passthrough: bool, /* non-consuming stdin watchdog */
     pub duration: Option<ArgValue<'a>>,
     pub command: Option<ArgValue<'a>>,
     pub args: Vec<ArgValue<'a>>,
@@ -164,6 +166,8 @@ pub struct OwnedArgs {
     pub retry_delay: Option<String>,
     pub retry_backoff: Option<String>,
     pub heartbeat: Option<String>,
+    pub stdin_timeout: Option<String>,
+    pub stdin_passthrough: bool,
     pub duration: Option<String>,
     pub command: Option<String>,
     pub args: Vec<String>,
@@ -190,6 +194,8 @@ impl<'a> Args<'a> {
             retry_delay: self.retry_delay.map(|v| v.into_owned()),
             retry_backoff: self.retry_backoff.map(|v| v.into_owned()),
             heartbeat: self.heartbeat.map(|v| v.into_owned()),
+            stdin_timeout: self.stdin_timeout.map(|v| v.into_owned()),
+            stdin_passthrough: self.stdin_passthrough,
             duration: self.duration.map(|v| v.into_owned()),
             command: self.command.map(|v| v.into_owned()),
             args: self.args.into_iter().map(|v| v.into_owned()).collect(),
@@ -237,6 +243,9 @@ pub fn parse_args() -> Result<OwnedArgs, ParseError> {
     }
     if owned.heartbeat.is_none() {
         owned.heartbeat = get_env(b"TIMEOUT_HEARTBEAT\0");
+    }
+    if owned.stdin_timeout.is_none() {
+        owned.stdin_timeout = get_env(b"TIMEOUT_STDIN_TIMEOUT\0");
     }
 
     Ok(owned)
@@ -471,6 +480,30 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                 result.heartbeat = Some(ArgValue::Borrowed(&s[12..]));
             }
 
+            "-S" => {
+                i += 1;
+                result.stdin_timeout = Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                    ParseError {
+                        message: "-S requires a duration".to_string(),
+                    }
+                })?));
+            }
+            "--stdin-timeout" => {
+                i += 1;
+                result.stdin_timeout = Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                    ParseError {
+                        message: "--stdin-timeout requires a duration".to_string(),
+                    }
+                })?));
+            }
+            s if s.starts_with("--stdin-timeout=") => {
+                result.stdin_timeout = Some(ArgValue::Borrowed(&s[16..]));
+            }
+
+            "--stdin-passthrough" => {
+                result.stdin_passthrough = true;
+            }
+
             /* unknown long option */
             s if s.starts_with("--") => {
                 return Err(ParseError {
@@ -597,6 +630,21 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                                         })?));
                                 }
                             }
+                            b'S' => {
+                                if j + 1 < bytes.len() {
+                                    result.stdin_timeout =
+                                        Some(ArgValue::Owned(s[j + 1..].to_string()));
+                                    break;
+                                } else {
+                                    i += 1;
+                                    result.stdin_timeout =
+                                        Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                                            ParseError {
+                                                message: "-S requires a duration".to_string(),
+                                            }
+                                        })?));
+                                }
+                            }
                             c => {
                                 return Err(ParseError {
                                     message: format!("unknown option: -{}", c as char),
@@ -696,6 +744,9 @@ Options:
       --retry-backoff <Nx>        Multiply delay by N each retry (e.g., 2x for exponential)
   -H, --heartbeat <DURATION>      Print status to stderr at regular intervals (for CI)
                                   [env: TIMEOUT_HEARTBEAT]
+  -S, --stdin-timeout <DURATION>  Kill command if stdin has no activity for DURATION
+      --stdin-passthrough         Use non-consuming stdin idle detection (paired with -S)
+                                  [env: TIMEOUT_STDIN_TIMEOUT]
       --json                      Output result as JSON (for scripting/CI)
   -h, --help                      Print help
   -V, --version                   Print version
@@ -703,6 +754,7 @@ Options:
 Exit status:
   124 if COMMAND times out, and --preserve-status is not specified
   124 if --wait-for-file times out
+  124 if --stdin-timeout triggers (stdin idle)
   125 if the timeout command itself fails
   126 if COMMAND is found but cannot be invoked
   127 if COMMAND cannot be found
@@ -715,6 +767,7 @@ Environment:
   TIMEOUT_KILL_AFTER  Default kill-after duration (overridden by -k)
   TIMEOUT_RETRY   Default retry count (overridden by -r/--retry)
   TIMEOUT_HEARTBEAT  Default heartbeat interval (overridden by -H/--heartbeat)
+  TIMEOUT_STDIN_TIMEOUT  Default stdin idle timeout
   TIMEOUT_WAIT_FOR_FILE  Default file to wait for
   TIMEOUT_WAIT_FOR_FILE_TIMEOUT  Default timeout for wait-for-file
 "#,
@@ -1160,5 +1213,86 @@ mod tests {
     fn test_heartbeat_short_flag_embedded() {
         let args = try_parse_from(["timeout", "-H30s", "5s", "cmd"]).unwrap();
         assert_eq!(args.heartbeat, Some("30s".to_string()));
+    }
+
+    /* stdin timeout argument tests */
+
+    #[test]
+    fn test_stdin_timeout_long_flag() {
+        let args = try_parse_from(["timeout", "--stdin-timeout", "30s", "5s", "cmd"]).unwrap();
+        assert_eq!(args.stdin_timeout, Some("30s".to_string()));
+    }
+
+    #[test]
+    fn test_stdin_passthrough_flag() {
+        let args = try_parse_from([
+            "timeout",
+            "--stdin-timeout",
+            "10s",
+            "--stdin-passthrough",
+            "5s",
+            "cmd",
+        ])
+        .unwrap();
+
+        assert!(args.stdin_passthrough);
+        assert_eq!(args.stdin_timeout, Some("10s".to_string()));
+    }
+
+    #[test]
+    fn test_stdin_timeout_equals_syntax() {
+        let args = try_parse_from(["timeout", "--stdin-timeout=1m", "5s", "cmd"]).unwrap();
+        assert_eq!(args.stdin_timeout, Some("1m".to_string()));
+    }
+
+    #[test]
+    fn test_stdin_timeout_missing_duration() {
+        let result = try_parse_from(["timeout", "--stdin-timeout"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("requires a duration"));
+    }
+
+    #[test]
+    fn test_stdin_timeout_combined_with_other_flags() {
+        let args = try_parse_from([
+            "timeout",
+            "-v",
+            "--json",
+            "--stdin-timeout",
+            "30s",
+            "5m",
+            "cmd",
+        ])
+        .unwrap();
+        assert!(args.verbose);
+        assert!(args.json);
+        assert_eq!(args.stdin_timeout, Some("30s".to_string()));
+        assert_eq!(args.duration, Some("5m".to_string()));
+    }
+
+    #[test]
+    fn test_stdin_timeout_with_main_timeout() {
+        let args = try_parse_from(["timeout", "--stdin-timeout", "30s", "5m", "cmd"]).unwrap();
+        assert_eq!(args.stdin_timeout, Some("30s".to_string()));
+        assert_eq!(args.duration, Some("5m".to_string()));
+    }
+
+    #[test]
+    fn test_stdin_timeout_short_flag() {
+        let args = try_parse_from(["timeout", "-S", "30s", "5s", "cmd"]).unwrap();
+        assert_eq!(args.stdin_timeout, Some("30s".to_string()));
+    }
+
+    #[test]
+    fn test_stdin_timeout_short_flag_embedded() {
+        let args = try_parse_from(["timeout", "-S30s", "5s", "cmd"]).unwrap();
+        assert_eq!(args.stdin_timeout, Some("30s".to_string()));
+    }
+
+    #[test]
+    fn test_stdin_timeout_short_flag_missing_duration() {
+        let result = try_parse_from(["timeout", "-S"]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("requires a duration"));
     }
 }

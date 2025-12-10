@@ -52,6 +52,7 @@ _timeout() {
         '--retry-delay[delay between retries]:duration:->duration' \
         '--retry-backoff[multiply delay by N each retry]:multiplier:(2x 3x 4x)' \
         '(-H --heartbeat)'{-H,--heartbeat}'[print status to stderr at interval]:duration:->duration' \
+        '(-S --stdin-timeout)'{-S,--stdin-timeout}'[kill if stdin idle for duration]:duration:->duration' \
         '--json[output JSON for scripting]' \
         '1:duration:->duration' \
         '2:command:_command_names' \
