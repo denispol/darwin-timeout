@@ -119,11 +119,17 @@ Use Cases
 
     timeout --wait-for-file /tmp/db-ready 5m ./migrate
 
-**Non-interactive CI**: Detect if a command unexpectedly prompts for user input. Kill tests that hang waiting for stdin, ensuring truly unattended execution.
+**Prompt detection**: Kill commands that unexpectedly prompt for input. Catch interactive tests hanging on stdin in unattended CI environments.
 
     timeout --stdin-timeout 5s ./test-suite  # fail if it prompts for input
 
-> **Note:** `--stdin-timeout` **consumes stdin data** to detect activity. It is intended for non-interactive environments to detect unexpected input prompts—not for monitoring active data streams piped to the child process. Use `--stdin-passthrough` alongside `--stdin-timeout` to detect idle without consuming the data. When stdin reaches EOF (e.g., `/dev/null`, closed pipe), stdin monitoring is automatically disabled and the wall clock timeout takes over.
+> **Note:** `--stdin-timeout` alone **consumes stdin data** to detect activity—the child won't receive it. This is ideal for detecting unexpected prompts in non-interactive CI.
+
+**Stream watchdog**: Monitor stdin activity without consuming the data stream. Useful for long-running pipelines where you want to detect stalls while preserving data flow to the child.
+
+    some-producer | timeout -S 30s --stdin-passthrough 1h some-consumer
+
+> When stdin reaches EOF (e.g., `/dev/null`, closed pipe), stdin monitoring is automatically disabled and the wall clock timeout takes over.
 
 **CI keep-alive**: Many CI systems (GitHub Actions, GitLab CI, Travis) kill jobs that produce no output for 10-30 minutes. Long builds, test suites, or deployments can trigger this even when working correctly. The heartbeat flag prints periodic status messages to prevent these false timeouts:
 
