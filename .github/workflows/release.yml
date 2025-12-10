@@ -8,9 +8,9 @@
 # have passed CI.
 #
 # Produces:
-#   - timeout-<version>-macos-arm64.tar.gz      (Apple Silicon)
-#   - timeout-<version>-macos-x86_64.tar.gz     (Intel)
-#   - timeout-<version>-macos-universal.tar.gz  (Universal binary)
+#   - timeout-macos-arm64.tar.gz      (Apple Silicon)
+#   - timeout-macos-x86_64.tar.gz     (Intel)
+#   - timeout-macos-universal.tar.gz  (Universal binary, used by Homebrew)
 #
 # Usage:
 #   git tag -a v1.0.0 -m "v1.0.0"
@@ -53,7 +53,6 @@ jobs:
 
       - name: Create binaries
         run: |
-          VERSION=${{ github.ref_name }}
           mkdir -p dist staging
           
           # ARM64 (Apple Silicon)
@@ -61,24 +60,23 @@ jobs:
           strip staging/timeout
           codesign -s - staging/timeout
           cp -r completions staging/
-          tar -C staging -czvf dist/timeout-${VERSION}-macos-arm64.tar.gz timeout completions
+          tar -C staging -czvf dist/timeout-macos-arm64.tar.gz timeout completions
           rm staging/timeout
           
           # x86_64 (Intel)
           cp target/x86_64-apple-darwin/release/timeout staging/timeout
           strip staging/timeout
           codesign -s - staging/timeout
-          tar -C staging -czvf dist/timeout-${VERSION}-macos-x86_64.tar.gz timeout completions
+          tar -C staging -czvf dist/timeout-macos-x86_64.tar.gz timeout completions
           rm staging/timeout
           
-          # Universal (also create unversioned for Homebrew)
+          # Universal (unversioned name for stable Homebrew URL)
           lipo -create \
             target/aarch64-apple-darwin/release/timeout \
             target/x86_64-apple-darwin/release/timeout \
             -output staging/timeout
           strip staging/timeout
           codesign -s - staging/timeout
-          tar -C staging -czvf dist/timeout-${VERSION}-macos-universal.tar.gz timeout completions
           tar -C staging -czvf dist/timeout-macos-universal.tar.gz timeout completions
           rm staging/timeout
           
@@ -87,7 +85,7 @@ jobs:
 
       - name: Verify binaries
         run: |
-          for f in dist/timeout-${{ github.ref_name }}-*.tar.gz; do
+          for f in dist/timeout-macos-*.tar.gz; do
             echo "=== $f ==="
             tar -tzf "$f"
             tar -xzf "$f" -C /tmp
@@ -108,13 +106,13 @@ jobs:
 
             | Platform | File |
             |----------|------|
-            | Apple Silicon | `timeout-${{ github.ref_name }}-macos-arm64.tar.gz` |
-            | Intel | `timeout-${{ github.ref_name }}-macos-x86_64.tar.gz` |
-            | Universal | `timeout-${{ github.ref_name }}-macos-universal.tar.gz` |
+            | Apple Silicon | `timeout-macos-arm64.tar.gz` |
+            | Intel | `timeout-macos-x86_64.tar.gz` |
+            | Universal | `timeout-macos-universal.tar.gz` |
 
             ```bash
             # Example: Install universal binary
-            tar -xzf timeout-${{ github.ref_name }}-macos-universal.tar.gz
+            tar -xzf timeout-macos-universal.tar.gz
             sudo mv timeout /usr/local/bin/
             ```
 
