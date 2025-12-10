@@ -305,8 +305,8 @@ fn print_json_output(
     attempts: &[AttemptResult],
     retry_count: u32,
 ) {
-    /* Schema version 4: added retry fields (attempts, attempt_results) */
-    const SCHEMA_VERSION: u8 = 4;
+    /* Schema version 5: added timeout_reason field for stdin idle timeout */
+    const SCHEMA_VERSION: u8 = 5;
 
     /* helper to append rusage fields to JSON string */
     fn append_rusage(json: &mut String, rusage: Option<&darwin_timeout::process::ResourceUsage>) {
@@ -365,17 +365,29 @@ fn print_json_output(
             status,
             rusage,
             hook,
+            reason,
         } => {
             let sig_num = darwin_timeout::signal::signal_number(*signal);
             let status_code = status.and_then(|s| s.code()).unwrap_or(-1);
             let sig_name = darwin_timeout::signal::signal_name(*signal);
+            let reason_str = match reason {
+                darwin_timeout::runner::TimeoutReason::WallClock => "wall_clock",
+                darwin_timeout::runner::TimeoutReason::StdinIdle => "stdin_idle",
+            };
 
             /* Build the JSON incrementally */
             let mut json = String::with_capacity(512);
             let _ = write!(
                 json,
-                r#"{{"schema_version":{},"status":"timeout","signal":"{}","signal_num":{},"killed":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}"#,
-                SCHEMA_VERSION, sig_name, sig_num, killed, status_code, exit_code, elapsed_ms
+                r#"{{"schema_version":{},"status":"timeout","timeout_reason":"{}","signal":"{}","signal_num":{},"killed":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}"#,
+                SCHEMA_VERSION,
+                reason_str,
+                sig_name,
+                sig_num,
+                killed,
+                status_code,
+                exit_code,
+                elapsed_ms
             );
 
             /* Add rusage fields if available */
@@ -432,7 +444,7 @@ fn print_json_output(
 }
 
 fn print_json_error(err: &darwin_timeout::error::TimeoutError, elapsed_ms: u64) {
-    const SCHEMA_VERSION: u8 = 4;
+    const SCHEMA_VERSION: u8 = 5;
 
     let exit_code = err.exit_code();
     /* Escape control characters for valid JSON */

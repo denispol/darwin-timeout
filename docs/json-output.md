@@ -12,10 +12,10 @@ Output is a single JSON object on stdout. The command's own stdout/stderr pass t
 
 ## Schema Version
 
-All JSON output includes a `schema_version` field. The current version is **4**.
+All JSON output includes a `schema_version` field. The current version is **5**.
 
 ```json
-{"schema_version":4,"status":"completed",...}
+{"schema_version":5,"status":"completed",...}
 ```
 
 Schema changes:
@@ -24,6 +24,7 @@ Schema changes:
 - **v2**: Added `hook_*` fields for `--on-timeout` results
 - **v3**: Added resource usage fields (`user_time_ms`, `system_time_ms`, `max_rss_kb`)
 - **v4**: Added retry fields (`attempts`, `attempt_results`)
+- **v5**: Added `timeout_reason` field to distinguish timeout types (`wall_clock` vs `stdin_idle`)
 
 ## Status Types
 
@@ -44,7 +45,7 @@ Command finished normally before the timeout.
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "completed",
   "exit_code": 0,
   "elapsed_ms": 1523,
@@ -56,7 +57,7 @@ Command finished normally before the timeout.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 4) |
+| `schema_version` | integer | Schema version (currently 5) |
 | `status` | string | Always `"completed"` |
 | `exit_code` | integer | Command's exit code (0-255) |
 | `elapsed_ms` | integer | Wall-clock time in milliseconds |
@@ -70,8 +71,9 @@ Command was killed because it exceeded the time limit.
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "timeout",
+  "timeout_reason": "wall_clock",
   "signal": "SIGTERM",
   "signal_num": 15,
   "killed": false,
@@ -86,8 +88,9 @@ Command was killed because it exceeded the time limit.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 4) |
+| `schema_version` | integer | Schema version (currently 5) |
 | `status` | string | Always `"timeout"` |
+| `timeout_reason` | string | Why timeout occurred: `"wall_clock"` (main timeout) or `"stdin_idle"` (stdin timeout via `-S`) |
 | `signal` | string | Signal sent to command (e.g., `"SIGTERM"`, `"SIGKILL"`) |
 | `signal_num` | integer | Signal number (e.g., 15 for SIGTERM, 9 for SIGKILL) |
 | `killed` | boolean | `true` if escalated to SIGKILL via `--kill-after` |
@@ -98,14 +101,43 @@ Command was killed because it exceeded the time limit.
 | `system_time_ms` | integer | System (kernel) CPU time in milliseconds |
 | `max_rss_kb` | integer | Peak memory usage in kilobytes |
 
+#### Stdin Idle Timeout
+
+When using `-S/--stdin-timeout`, a timeout can occur due to stdin inactivity:
+
+```json
+{
+  "schema_version": 5,
+  "status": "timeout",
+  "timeout_reason": "stdin_idle",
+  "signal": "SIGTERM",
+  "signal_num": 15,
+  "killed": false,
+  "command_exit_code": -1,
+  "exit_code": 124,
+  "elapsed_ms": 502,
+  "user_time_ms": 10,
+  "system_time_ms": 5,
+  "max_rss_kb": 2048
+}
+```
+
+The `timeout_reason` field distinguishes between:
+
+- `"wall_clock"`: Main timeout duration was exceeded
+- `"stdin_idle"`: No stdin activity for the duration specified by `-S/--stdin-timeout`
+
+**Note:** When stdin reaches EOF (e.g., from `/dev/null` or a closed pipe), stdin monitoring is automatically disabled to prevent busy-loops. In this case, the wall clock timeout will fire and `timeout_reason` will be `"wall_clock"` even if `--stdin-timeout` was specified.
+
 #### With --on-timeout hook
 
 When `--on-timeout` is specified, additional fields describe the hook execution:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "timeout",
+  "timeout_reason": "wall_clock",
   "signal": "SIGTERM",
   "signal_num": 15,
   "killed": false,
@@ -135,7 +167,7 @@ When `--retry N` is specified (N > 0), additional fields track retry attempts:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "completed",
   "exit_code": 0,
   "elapsed_ms": 45000,
@@ -172,7 +204,7 @@ timeout received a signal (e.g., from `docker stop`, `kill`, or Ctrl+C) and forw
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "signal_forwarded",
   "signal": "SIGTERM",
   "signal_num": 15,
@@ -187,7 +219,7 @@ timeout received a signal (e.g., from `docker stop`, `kill`, or Ctrl+C) and forw
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 4) |
+| `schema_version` | integer | Schema version (currently 5) |
 | `status` | string | Always `"signal_forwarded"` |
 | `signal` | string | Signal that was forwarded |
 | `signal_num` | integer | Signal number |
@@ -204,7 +236,7 @@ timeout itself encountered an error.
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "error",
   "error": "command not found: nonexistent_cmd",
   "exit_code": 127,
@@ -214,7 +246,7 @@ timeout itself encountered an error.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 4) |
+| `schema_version` | integer | Schema version (currently 5) |
 | `status` | string | Always `"error"` |
 | `error` | string | Human-readable error message |
 | `exit_code` | integer | Exit code (125=internal error, 126=not executable, 127=not found) |

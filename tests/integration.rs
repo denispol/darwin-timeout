@@ -1495,28 +1495,28 @@ fn test_quiet_verbose_conflict() {
 #[test]
 fn test_json_schema_version() {
     /*
-     * All JSON output should include schema_version field (version 4 with retry fields)
+     * All JSON output should include schema_version field (version 5 with timeout_reason)
      */
     /* Test completed */
     timeout_cmd()
         .args(["--json", "5s", "true"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""schema_version":4"#));
+        .stdout(predicate::str::contains(r#""schema_version":5"#));
 
     /* Test timeout */
     timeout_cmd()
         .args(["--json", "0.1s", "sleep", "10"])
         .assert()
         .code(124)
-        .stdout(predicate::str::contains(r#""schema_version":4"#));
+        .stdout(predicate::str::contains(r#""schema_version":5"#));
 
     /* Test error */
     timeout_cmd()
         .args(["--json", "5s", "nonexistent_command_xyz_12345"])
         .assert()
         .code(127)
-        .stdout(predicate::str::contains(r#""schema_version":4"#));
+        .stdout(predicate::str::contains(r#""schema_version":5"#));
 }
 
 #[test]
@@ -2438,5 +2438,599 @@ fn test_heartbeat_with_confine_active() {
         stderr.contains("timeout: heartbeat:"),
         "heartbeat should work with confine active: {}",
         stderr
+    );
+}
+
+/* =========================================================================
+ * STDIN TIMEOUT - Interactive process detection
+ * ========================================================================= */
+
+#[test]
+fn test_stdin_timeout_triggers() {
+    /*
+     * --stdin-timeout should kill command if stdin has no activity for the duration.
+     * Using stdin(Stdio::piped()) creates a pipe that blocks (no EOF).
+     * We must take() the stdin handle to prevent EOF when wait() is called.
+     */
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["--stdin-timeout", "200ms", "60s", "sleep", "60"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take(); /* keep pipe open */
+    let status = child.wait().expect("failed to wait");
+    /* should exit 124 (timeout) due to stdin idle */
+    assert_eq!(status.code(), Some(124), "should timeout due to stdin idle");
+}
+
+#[test]
+fn test_stdin_timeout_short_flag() {
+    /*
+     * -S short flag should work like --stdin-timeout
+     */
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["-S", "200ms", "60s", "sleep", "60"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take();
+    let status = child.wait().expect("failed to wait");
+    assert_eq!(status.code(), Some(124), "-S should trigger stdin timeout");
+}
+
+#[test]
+fn test_stdin_timeout_short_flag_embedded() {
+    /*
+     * -S200ms embedded value should work
+     */
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["-S200ms", "60s", "sleep", "60"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take();
+    let status = child.wait().expect("failed to wait");
+    assert_eq!(
+        status.code(),
+        Some(124),
+        "-S200ms should trigger stdin timeout"
+    );
+}
+
+#[test]
+fn test_stdin_timeout_not_triggered_on_fast_exit() {
+    /*
+     * stdin-timeout should NOT fire if command exits before the idle duration.
+     */
+    timeout_cmd()
+        .args(["--stdin-timeout", "60s", "60s", "true"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_stdin_timeout_env_var() {
+    /*
+     * TIMEOUT_STDIN_TIMEOUT env var should set default stdin timeout
+     */
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .env("TIMEOUT_STDIN_TIMEOUT", "200ms")
+        .args(["60s", "sleep", "60"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take();
+    let status = child.wait().expect("failed to wait");
+    assert_eq!(
+        status.code(),
+        Some(124),
+        "TIMEOUT_STDIN_TIMEOUT should trigger timeout"
+    );
+}
+
+#[test]
+fn test_stdin_timeout_cli_overrides_env() {
+    /*
+     * CLI --stdin-timeout should override env var
+     */
+    use std::process::Stdio;
+    /* env var would trigger quickly (50ms), but CLI sets longer timeout (60s) */
+    /* so wall clock timeout (200ms) fires first */
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .env("TIMEOUT_STDIN_TIMEOUT", "50ms")
+        .args(["--stdin-timeout", "60s", "200ms", "sleep", "60"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take();
+    let status = child.wait().expect("failed to wait");
+    /* should timeout from wall clock (200ms), not stdin (60s) */
+    assert_eq!(status.code(), Some(124), "CLI should override env var");
+}
+
+#[test]
+fn test_stdin_timeout_json_reason_stdin_idle() {
+    /*
+     * JSON should include timeout_reason: "stdin_idle" when stdin timeout fires
+     */
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["--json", "--stdin-timeout", "100ms", "60s", "sleep", "60"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take();
+    let status = child.wait().expect("failed to wait");
+    let mut stdout_content = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout.read_to_string(&mut stdout_content).ok();
+    }
+
+    assert_eq!(status.code(), Some(124), "should exit 124");
+    assert!(
+        stdout_content.contains(r#""timeout_reason":"stdin_idle""#),
+        "should show stdin_idle reason: {}",
+        stdout_content
+    );
+    assert!(
+        stdout_content.contains(r#""status":"timeout""#),
+        "should show timeout status: {}",
+        stdout_content
+    );
+}
+
+#[test]
+fn test_stdin_timeout_json_reason_wall_clock() {
+    /*
+     * JSON should include timeout_reason: "wall_clock" when main timeout fires
+     */
+    let output = timeout_cmd()
+        .args(["--json", "100ms", "sleep", "10"])
+        .output()
+        .expect("failed to run command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(r#""timeout_reason":"wall_clock""#),
+        "should show wall_clock reason: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""status":"timeout""#),
+        "should show timeout status: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_stdin_timeout_verbose() {
+    /*
+     * Verbose should show stdin idle message
+     */
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args([
+            "--verbose",
+            "--stdin-timeout",
+            "100ms",
+            "60s",
+            "sleep",
+            "60",
+        ])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take();
+    let status = child.wait().expect("failed to wait");
+    let mut stderr_content = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        use std::io::Read;
+        stderr.read_to_string(&mut stderr_content).ok();
+    }
+
+    assert_eq!(status.code(), Some(124));
+    /* verbose output should mention stdin */
+    assert!(
+        stderr_content.contains("stdin") || stderr_content.contains("SIGTERM"),
+        "verbose should mention stdin idle or signal: {}",
+        stderr_content
+    );
+}
+
+#[test]
+fn test_stdin_timeout_quiet() {
+    /*
+     * Quiet mode should suppress stdin timeout messages
+     */
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["--quiet", "--stdin-timeout", "100ms", "60s", "sleep", "60"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take();
+    let status = child.wait().expect("failed to wait");
+    let mut stderr_content = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        use std::io::Read;
+        stderr.read_to_string(&mut stderr_content).ok();
+    }
+
+    assert_eq!(status.code(), Some(124));
+    /* stderr should be empty (no diagnostics) */
+    assert!(
+        stderr_content.is_empty(),
+        "quiet should suppress messages: {}",
+        stderr_content
+    );
+}
+
+#[test]
+fn test_stdin_timeout_with_wall_timeout() {
+    /*
+     * Both timeouts can be set; whichever fires first wins.
+     * Here stdin timeout (100ms) should fire before wall timeout (60s).
+     */
+    use std::process::Stdio;
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["--stdin-timeout", "100ms", "60s", "sleep", "60"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take();
+    let status = child.wait().expect("failed to wait");
+    let elapsed = start.elapsed();
+
+    assert_eq!(status.code(), Some(124));
+    /* should complete quickly due to stdin timeout, not wait 60s */
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "should timeout quickly from stdin idle: {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn test_stdin_timeout_wall_timeout_fires_first() {
+    /*
+     * If wall timeout is shorter than stdin timeout, wall timeout fires first.
+     */
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["--json", "--stdin-timeout", "60s", "100ms", "sleep", "60"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take();
+    let status = child.wait().expect("failed to wait");
+    let mut stdout_content = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout.read_to_string(&mut stdout_content).ok();
+    }
+
+    assert_eq!(status.code(), Some(124));
+    assert!(
+        stdout_content.contains(r#""timeout_reason":"wall_clock""#),
+        "wall clock should fire first: {}",
+        stdout_content
+    );
+}
+
+#[test]
+fn test_stdin_timeout_with_heartbeat() {
+    /*
+     * stdin-timeout should work alongside heartbeat
+     */
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args([
+            "--heartbeat",
+            "50ms",
+            "--stdin-timeout",
+            "200ms",
+            "60s",
+            "sleep",
+            "60",
+        ])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take();
+    let status = child.wait().expect("failed to wait");
+    let mut stderr_content = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        stderr.read_to_string(&mut stderr_content).ok();
+    }
+
+    assert_eq!(status.code(), Some(124), "should timeout with both flags");
+    assert!(
+        stderr_content.contains("heartbeat"),
+        "heartbeat should still print: {}",
+        stderr_content
+    );
+}
+
+#[test]
+fn test_stdin_timeout_combined_flags() {
+    /*
+     * stdin-timeout should work with other flags like -v and -p
+     */
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["-v", "-S", "100ms", "60s", "sleep", "60"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take();
+    let status = child.wait().expect("failed to wait");
+    let mut stderr_content = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        stderr.read_to_string(&mut stderr_content).ok();
+    }
+
+    assert_eq!(status.code(), Some(124));
+    /* verbose should show something */
+    assert!(
+        !stderr_content.is_empty(),
+        "verbose should produce output: {}",
+        stderr_content
+    );
+}
+
+#[test]
+fn test_stdin_timeout_dev_null_no_busy_loop() {
+    /*
+     * When stdin is /dev/null (immediate EOF), stdin timeout should be
+     * disabled and not cause a busy loop. Command should wait for wall
+     * clock timeout normally.
+     */
+    use std::fs::File;
+
+    let dev_null = File::open("/dev/null").expect("failed to open /dev/null");
+    let start = std::time::Instant::now();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["--stdin-timeout", "50ms", "200ms", "sleep", "60"])
+        .stdin(dev_null)
+        .spawn()
+        .expect("failed to spawn");
+
+    let status = child.wait().expect("failed to wait");
+    let elapsed = start.elapsed();
+
+    /* should exit 124 (timeout) */
+    assert_eq!(status.code(), Some(124));
+
+    /* should take ~200ms (wall clock), not 50ms (stdin timeout disabled on EOF) */
+    assert!(
+        elapsed >= std::time::Duration::from_millis(150),
+        "should wait for wall clock timeout, not stdin (elapsed: {:?})",
+        elapsed
+    );
+    /* should complete in reasonable time, not hang */
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "should not hang: {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn test_stdin_timeout_null_stdin_no_cpu_spike() {
+    /*
+     * When stdin is Stdio::null(), it should behave like /dev/null -
+     * no busy loop, no CPU spike, wall clock timeout fires.
+     */
+    use std::process::Stdio;
+
+    let start = std::time::Instant::now();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["--stdin-timeout", "50ms", "200ms", "sleep", "60"])
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("failed to spawn");
+
+    let status = child.wait().expect("failed to wait");
+    let elapsed = start.elapsed();
+
+    assert_eq!(status.code(), Some(124));
+    /* should wait for wall clock, not immediately trigger stdin timeout */
+    assert!(
+        elapsed >= std::time::Duration::from_millis(150),
+        "should wait for wall clock timeout: {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn test_stdin_timeout_closed_stdin_graceful() {
+    /*
+     * When stdin fd is closed (0<&-), stdin timeout should be disabled
+     * gracefully and fall back to wall clock timeout.
+     */
+    let start = std::time::Instant::now();
+
+    /* run via sh to close stdin: 0<&- closes fd 0 */
+    let output = std::process::Command::new("sh")
+        .args([
+            "-c",
+            &format!(
+                "{} --stdin-timeout 50ms 200ms sleep 60 0<&-",
+                env!("CARGO_BIN_EXE_timeout")
+            ),
+        ])
+        .output()
+        .expect("failed to run command");
+
+    let elapsed = start.elapsed();
+
+    assert_eq!(output.status.code(), Some(124));
+    /* should wait for wall clock timeout since stdin is invalid */
+    assert!(
+        elapsed >= std::time::Duration::from_millis(150),
+        "should wait for wall clock timeout: {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn test_stdin_timeout_json_with_dev_null() {
+    /*
+     * JSON output should show wall_clock reason when stdin is /dev/null
+     * (stdin timeout disabled due to immediate EOF).
+     */
+    use std::fs::File;
+
+    let dev_null = File::open("/dev/null").expect("failed to open /dev/null");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args(["--json", "--stdin-timeout", "50ms", "100ms", "sleep", "60"])
+        .stdin(dev_null)
+        .output()
+        .expect("failed to run command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(124));
+    /* stdin timeout disabled on EOF, so wall_clock fires */
+    assert!(
+        stdout.contains(r#""timeout_reason":"wall_clock""#),
+        "should show wall_clock reason when stdin is /dev/null: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_stdin_timeout_with_retry() {
+    /*
+     * --stdin-timeout with --retry: each retry attempt should get fresh
+     * stdin timeout state. First attempt times out due to stdin idle,
+     * subsequent retries should also work correctly.
+     */
+    use std::process::Stdio;
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args([
+            "--json",
+            "--stdin-timeout",
+            "100ms",
+            "--retry",
+            "1",
+            "60s",
+            "sleep",
+            "60",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn");
+
+    let _stdin = child.stdin.take(); /* keep pipe open, no data sent */
+    let output = child.wait_with_output().expect("failed to wait");
+    let elapsed = start.elapsed();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(124));
+
+    /* should have 2 attempts (initial + 1 retry) */
+    assert!(
+        stdout.contains(r#""attempts":2"#),
+        "should have 2 attempts: {}",
+        stdout
+    );
+
+    /* both attempts should timeout from stdin idle */
+    assert!(
+        stdout.contains(r#""timeout_reason":"stdin_idle""#),
+        "final result should show stdin_idle reason: {}",
+        stdout
+    );
+
+    /* should complete in ~200ms (100ms x 2 attempts), not hang */
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "should not hang: {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn test_stdin_timeout_retry_with_dev_null() {
+    /*
+     * --stdin-timeout with --retry and /dev/null stdin: each retry should
+     * detect EOF and fall back to wall clock timeout.
+     */
+    use std::fs::File;
+
+    let dev_null = File::open("/dev/null").expect("failed to open /dev/null");
+    let start = std::time::Instant::now();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args([
+            "--json",
+            "--stdin-timeout",
+            "50ms",
+            "--retry",
+            "1",
+            "100ms",
+            "sleep",
+            "60",
+        ])
+        .stdin(dev_null)
+        .output()
+        .expect("failed to run command");
+
+    let elapsed = start.elapsed();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(124));
+
+    /* should have 2 attempts */
+    assert!(
+        stdout.contains(r#""attempts":2"#),
+        "should have 2 attempts: {}",
+        stdout
+    );
+
+    /* final timeout should be wall_clock since stdin EOF disables stdin timeout */
+    assert!(
+        stdout.contains(r#""timeout_reason":"wall_clock""#),
+        "should show wall_clock reason: {}",
+        stdout
+    );
+
+    /* should take ~200ms (100ms x 2), not instant (stdin timeout not firing prematurely) */
+    assert!(
+        elapsed >= std::time::Duration::from_millis(150),
+        "should wait for wall clock timeouts: {:?}",
+        elapsed
     );
 }

@@ -426,6 +426,7 @@ pub enum RunResult {
         status: Option<RawExitStatus>,
         rusage: Option<ResourceUsage>,
         hook: Option<HookResult>, /* on-timeout hook result if configured */
+        reason: TimeoutReason,    /* what triggered the timeout */
     },
     SignalForwarded {
         /* we got SIGTERM/SIGINT/SIGHUP, passed it on */
@@ -433,6 +434,15 @@ pub enum RunResult {
         status: Option<RawExitStatus>,
         rusage: Option<ResourceUsage>,
     },
+}
+
+/// Reason for timeout (wall clock vs stdin idle)
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimeoutReason {
+    #[default]
+    WallClock,
+    StdinIdle,
 }
 
 impl RunResult {
@@ -447,6 +457,7 @@ impl RunResult {
                 status,
                 hook: _,
                 rusage: _,
+                reason: _,
             } => {
                 if preserve_status {
                     status.map_or_else(
@@ -497,20 +508,21 @@ fn status_to_exit_code(status: &RawExitStatus) -> u8 {
 
 /* runtime config built from CLI args */
 pub struct RunConfig {
-    pub timeout: Duration,            /* how long before we send the signal */
-    pub signal: Signal,               /* what to send (default: SIGTERM) */
-    pub kill_after: Option<Duration>, /* if set, SIGKILL after this grace period */
-    pub foreground: bool,             /* don't create process group */
-    pub verbose: bool,                /* print signal diagnostics */
-    pub quiet: bool,                  /* suppress our stderr */
-    pub timeout_exit_code: u8,        /* exit code on timeout (default: 124) */
-    pub on_timeout: Option<String>,   /* hook to run before killing (%p = PID) */
-    pub on_timeout_limit: Duration,   /* how long hook gets to run */
-    pub confine: Confine,             /* wall (includes sleep) or active (excludes sleep) */
-    pub retry_count: u32,             /* number of retries on timeout (0 = no retry) */
-    pub retry_delay: Duration,        /* delay between retries */
-    pub retry_backoff: u32,           /* multiplier for delay each retry (1 = no backoff) */
-    pub heartbeat: Option<Duration>,  /* print status to stderr at this interval */
+    pub timeout: Duration,               /* how long before we send the signal */
+    pub signal: Signal,                  /* what to send (default: SIGTERM) */
+    pub kill_after: Option<Duration>,    /* if set, SIGKILL after this grace period */
+    pub foreground: bool,                /* don't create process group */
+    pub verbose: bool,                   /* print signal diagnostics */
+    pub quiet: bool,                     /* suppress our stderr */
+    pub timeout_exit_code: u8,           /* exit code on timeout (default: 124) */
+    pub on_timeout: Option<String>,      /* hook to run before killing (%p = PID) */
+    pub on_timeout_limit: Duration,      /* how long hook gets to run */
+    pub confine: Confine,                /* wall (includes sleep) or active (excludes sleep) */
+    pub retry_count: u32,                /* number of retries on timeout (0 = no retry) */
+    pub retry_delay: Duration,           /* delay between retries */
+    pub retry_backoff: u32,              /* multiplier for delay each retry (1 = no backoff) */
+    pub heartbeat: Option<Duration>,     /* print status to stderr at this interval */
+    pub stdin_timeout: Option<Duration>, /* timeout if stdin has no activity */
 }
 
 impl RunConfig {
@@ -568,6 +580,13 @@ impl RunConfig {
             .map(|s| parse_duration(s))
             .transpose()?;
 
+        /* parse stdin idle timeout */
+        let stdin_timeout = args
+            .stdin_timeout
+            .as_ref()
+            .map(|s| parse_duration(s))
+            .transpose()?;
+
         /* Warn if on-timeout-limit exceeds main timeout (when hook is set) */
         if args.on_timeout.is_some() && on_timeout_limit > timeout && !is_no_timeout(&timeout) {
             crate::eprintln!(
@@ -592,6 +611,7 @@ impl RunConfig {
             retry_delay,
             retry_backoff,
             heartbeat,
+            stdin_timeout,
         })
     }
 }
@@ -755,24 +775,37 @@ pub fn run_with_retry(
 fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunResult> {
     #[allow(clippy::cast_possible_wrap)]
     let pid = child.id() as i32;
+    let start_ns = precise_now_ns(config.confine)?;
 
     /* build heartbeat config if enabled */
-    let heartbeat_config = if let Some(interval) = config.heartbeat {
-        /* get start time outside closure so errors propagate */
-        let start_ns = precise_now_ns(config.confine)?;
-        Some(HeartbeatConfig {
-            interval_ns: duration_to_ns(interval),
-            quiet: config.quiet,
-            pid,
-            start_ns,
-        })
-    } else {
-        None
-    };
+    let heartbeat_config = config.heartbeat.map(|interval| HeartbeatConfig {
+        interval_ns: duration_to_ns(interval),
+        quiet: config.quiet,
+        pid,
+        start_ns,
+    });
+
+    /* build stdin timeout config if enabled */
+    let stdin_timeout_config = config.stdin_timeout.map(|d| StdinTimeoutConfig {
+        timeout_ns: duration_to_ns(d),
+        last_activity_ns: start_ns,
+    });
 
     /* wait for exit or timeout */
-    let exit_result =
-        wait_with_kqueue(child, pid, config.timeout, config.confine, heartbeat_config)?;
+    let exit_result = wait_with_kqueue(
+        child,
+        pid,
+        config.timeout,
+        config.confine,
+        heartbeat_config,
+        stdin_timeout_config,
+    )?;
+
+    /* track which timeout triggered */
+    let timeout_reason = match &exit_result {
+        WaitResult::TimedOut(reason) => *reason,
+        _ => TimeoutReason::WallClock, /* default, won't be used */
+    };
 
     match exit_result {
         WaitResult::Exited(status, rusage) => {
@@ -795,7 +828,16 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
                 rusage,
             });
         }
-        WaitResult::TimedOut => { /* Continue to timeout handling below */ }
+        WaitResult::TimedOut(reason) => {
+            /* Continue to timeout handling below, with the reason */
+            if config.verbose && !config.quiet {
+                let reason_str = match reason {
+                    TimeoutReason::WallClock => "wall clock",
+                    TimeoutReason::StdinIdle => "stdin idle",
+                };
+                crate::eprintln!("timeout: triggered by {}", reason_str);
+            }
+        }
     }
 
     /* Run on-timeout hook if specified */
@@ -816,8 +858,8 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
 
     /* if --kill-after, give it a grace period then escalate to SIGKILL */
     if let Some(kill_after) = config.kill_after {
-        /* no heartbeat during grace period */
-        let grace_result = wait_with_kqueue(child, pid, kill_after, config.confine, None)?;
+        /* no heartbeat or stdin timeout during grace period */
+        let grace_result = wait_with_kqueue(child, pid, kill_after, config.confine, None, None)?;
 
         match grace_result {
             WaitResult::Exited(status, rusage) => {
@@ -827,6 +869,7 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
                     status: Some(status),
                     rusage: Some(rusage),
                     hook: hook_result,
+                    reason: timeout_reason,
                 });
             }
             WaitResult::ReceivedSignal(sig) => {
@@ -846,7 +889,7 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
                     rusage,
                 });
             }
-            WaitResult::TimedOut => { /* Continue to SIGKILL below */ }
+            WaitResult::TimedOut(_) => { /* Continue to SIGKILL below */ }
         }
 
         /* still alive? SIGKILL it */
@@ -867,6 +910,7 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
             status: Some(status),
             rusage: Some(rusage),
             hook: hook_result,
+            reason: timeout_reason,
         })
     } else {
         /* no kill-after, just wait for it to die */
@@ -881,6 +925,7 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
             status: Some(status),
             rusage: Some(rusage),
             hook: hook_result,
+            reason: timeout_reason,
         })
     }
 }
@@ -890,9 +935,15 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
  */
 enum WaitResult {
     Exited(RawExitStatus, ResourceUsage),
-    TimedOut,
+    TimedOut(TimeoutReason), /* what triggered: wall clock or stdin idle */
     /// Received a signal that should be forwarded to the child
     ReceivedSignal(Signal),
+}
+
+/* stdin timeout config for wait_with_kqueue */
+struct StdinTimeoutConfig {
+    timeout_ns: u64,       /* stdin idle timeout in nanoseconds */
+    last_activity_ns: u64, /* timestamp of last stdin activity */
 }
 
 /* heartbeat config for wait_with_kqueue */
@@ -947,6 +998,9 @@ fn errno() -> i32 {
  *
  * With heartbeat: wakes at min(remaining_timeout, next_heartbeat), prints
  * status message on heartbeat intervals, continues waiting until timeout.
+ *
+ * With stdin timeout: adds EVFILT_READ on fd 0, resets timer on activity,
+ * triggers if stdin is idle for the specified duration.
  */
 fn wait_with_kqueue(
     child: &mut RawChild,
@@ -954,6 +1008,7 @@ fn wait_with_kqueue(
     timeout: Duration,
     confine: Confine,
     heartbeat: Option<HeartbeatConfig>,
+    mut stdin_timeout: Option<StdinTimeoutConfig>,
 ) -> Result<WaitResult> {
     let start_ns = precise_now_ns(confine)?;
     let timeout_ns = duration_to_ns(timeout);
@@ -972,6 +1027,27 @@ fn wait_with_kqueue(
         if fd >= 0 { Some(fd) } else { None }
     };
 
+    /* stdin timeout tracking */
+    let stdin_timeout_ns = stdin_timeout.as_ref().map_or(0, |s| s.timeout_ns);
+    /* validate stdin fd before enabling monitoring - fstat returns -1 if fd is invalid */
+    let stdin_valid = if stdin_timeout.is_some() {
+        // SAFETY: zeroed stat struct is valid for fstat call below
+        let mut stat: libc::stat = unsafe { core::mem::zeroed() };
+        // SAFETY: fstat with valid stat buffer, fd 0 may or may not be valid
+        let result = unsafe { libc::fstat(0, &raw mut stat) };
+        if result < 0 {
+            /* stdin fd is invalid (closed, bad fd) - disable stdin timeout */
+            stdin_timeout = None;
+            false
+        } else {
+            true
+        }
+    } else {
+        false
+    };
+    /* mutable: updated when stdin EOF/error disables monitoring */
+    let mut stdin_enabled = stdin_valid;
+
     /* create kqueue fd */
     // SAFETY: kqueue() has no preconditions, returns -1 on error (checked below).
     let kq = unsafe { libc::kqueue() };
@@ -988,9 +1064,10 @@ fn wait_with_kqueue(
      * - EVFILT_TIMER + NOTE_NSECONDS: nanosecond timer (kernel scheduler adds
      *   ~15-30ms latency anyway, but we're not the bottleneck)
      * - EVFILT_READ on signal pipe: self-pipe trick for forwarding signals
+     * - EVFILT_READ on stdin (fd 0): watch for stdin activity
      *
      * EV_ONESHOT on proc/timer means auto-delete after firing.
-     * Signal pipe stays registered for multiple signals.
+     * Signal pipe and stdin stay registered for multiple events.
      */
     /* Use fixed-size array instead of Vec to avoid heap allocation */
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
@@ -1023,8 +1100,25 @@ fn wait_with_kqueue(
             data: 0,
             udata: core::ptr::null_mut(),
         },
+        /* Stdin watcher (may be unused if no stdin timeout) */
+        libc::kevent {
+            ident: 0, /* stdin is fd 0 */
+            filter: libc::EVFILT_READ,
+            flags: if stdin_enabled { libc::EV_ADD } else { 0 },
+            fflags: 0,
+            data: 0,
+            udata: core::ptr::null_mut(),
+        },
     ];
-    let num_changes = if signal_fd.is_some() { 3 } else { 2 };
+    /*
+     * count active changes dynamically:
+     * - proc and timer are always active (indices 0, 1)
+     * - signal pipe is active if signal_fd is set (index 2)
+     * - stdin is active if enabled or being deleted (index 3)
+     *
+     * Note: kevent entries with flags=0 are no-ops, but we only include
+     * entries up to num_changes to avoid any potential issues.
+     */
 
     /* Buffer for returned events - we only need one */
     let mut event = libc::kevent {
@@ -1044,6 +1138,7 @@ fn wait_with_kqueue(
      *
      * No timeout arg to kevent, the timer filter handles it.
      * With heartbeat: timer fires at min(remaining_timeout, time_to_next_heartbeat).
+     * With stdin timeout: timer fires at min(remaining_timeout, stdin_deadline).
      */
     let deadline_ns = start_ns.saturating_add(timeout_ns);
 
@@ -1053,19 +1148,46 @@ fn wait_with_kqueue(
         if now_ns >= deadline_ns {
             // SAFETY: kq is a valid fd, close is always safe
             unsafe { libc::close(kq) };
-            return Ok(WaitResult::TimedOut);
+            return Ok(WaitResult::TimedOut(TimeoutReason::WallClock));
         }
         let remaining_ns = deadline_ns.saturating_sub(now_ns);
 
-        /* calculate next wake time: min(remaining timeout, time to next heartbeat) */
+        /* check stdin idle timeout */
+        if let Some(ref stdin_cfg) = stdin_timeout {
+            let stdin_idle_ns = now_ns.saturating_sub(stdin_cfg.last_activity_ns);
+            if stdin_idle_ns >= stdin_timeout_ns {
+                // SAFETY: kq is a valid fd
+                unsafe { libc::close(kq) };
+                return Ok(WaitResult::TimedOut(TimeoutReason::StdinIdle));
+            }
+        }
+
+        /* calculate next wake time: min(remaining timeout, time to next heartbeat, stdin timeout) */
         let time_to_heartbeat = next_heartbeat_ns.saturating_sub(now_ns);
-        let next_wake_ns = remaining_ns.min(time_to_heartbeat);
+        let time_to_stdin_timeout = if let Some(ref stdin_cfg) = stdin_timeout {
+            let stdin_idle_ns = now_ns.saturating_sub(stdin_cfg.last_activity_ns);
+            stdin_timeout_ns.saturating_sub(stdin_idle_ns)
+        } else {
+            u64::MAX
+        };
+        let next_wake_ns = remaining_ns
+            .min(time_to_heartbeat)
+            .min(time_to_stdin_timeout);
 
         /* update timer to next wake time */
         #[allow(clippy::cast_possible_wrap)]
         {
             changes[1].data = next_wake_ns.min(MAX_TIMER_NS) as isize;
         }
+
+        /* calculate how many changes to submit:
+         * - indices 0,1 (proc+timer) always active
+         * - index 2 (signal pipe) if present
+         * - index 3 (stdin) if enabled OR being deleted
+         */
+        let stdin_active = stdin_enabled || changes[3].flags == libc::EV_DELETE;
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let num_changes: i32 = 2 + i32::from(signal_fd.is_some()) + i32::from(stdin_active);
 
         // SAFETY: kq is a valid kqueue fd. changes is a valid slice of kevent structs.
         // event is a valid buffer for one kevent. Timeout is null (wait forever).
@@ -1082,6 +1204,11 @@ fn wait_with_kqueue(
             )
         };
 
+        /* after kevent returns, clear EV_DELETE to avoid re-submitting */
+        if changes[3].flags == libc::EV_DELETE {
+            changes[3].flags = 0;
+        }
+
         if n < 0 {
             let err = errno();
             /* EINTR: signal interrupted us, retry with remaining time */
@@ -1093,22 +1220,20 @@ fn wait_with_kqueue(
                 // SAFETY: kq is a valid fd
                 unsafe { libc::close(kq) };
                 /* try non-blocking first, fall back to blocking wait */
-                match child.try_wait() {
-                    Ok(Some((status, rusage))) => return Ok(WaitResult::Exited(status, rusage)),
-                    Ok(None) | Err(_) => {
-                        /* ESRCH from kernel but child not reaped yet - use blocking wait.
-                         * ECHILD error means already reaped elsewhere - treat as timeout. */
-                        match child.wait() {
-                            Ok((status, rusage)) => return Ok(WaitResult::Exited(status, rusage)),
-                            Err(SpawnError::Wait(e)) if e == libc::ECHILD => {
-                                return Ok(WaitResult::TimedOut);
-                            }
-                            Err(e) => {
-                                return Err(TimeoutError::Internal(format!("wait failed: {}", e)));
-                            }
+                let Some((status, rusage)) = child.try_wait().ok().flatten() else {
+                    /* ESRCH from kernel but child not reaped yet - use blocking wait.
+                     * ECHILD error means already reaped elsewhere - treat as timeout. */
+                    let wait_result = child.wait();
+                    return match wait_result {
+                        Ok((status, rusage)) => Ok(WaitResult::Exited(status, rusage)),
+                        Err(SpawnError::Wait(e)) if e == libc::ECHILD => {
+                            Ok(WaitResult::TimedOut(TimeoutReason::WallClock))
                         }
-                    }
-                }
+                        Err(e) => Err(TimeoutError::Internal(format!("wait failed: {}", e))),
+                    };
+                };
+
+                return Ok(WaitResult::Exited(status, rusage));
             }
             // SAFETY: kq is a valid fd
             unsafe { libc::close(kq) };
@@ -1117,11 +1242,50 @@ fn wait_with_kqueue(
             )));
         }
 
+        /* handle stdin activity - reset the idle timer */
+        if event.filter == libc::EVFILT_READ && event.ident == 0 && stdin_enabled {
+            /* drain any available data to prevent busy-loop - we just care about activity */
+            let mut buf = [0u8; 1024];
+            // SAFETY: read from stdin (fd 0) with valid buffer
+            let bytes_read = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+
+            if bytes_read == 0 {
+                /* EOF on stdin - no more input possible, disable stdin monitoring.
+                 * This prevents busy-loop when stdin is /dev/null or closed pipe. */
+                stdin_timeout = None;
+                stdin_enabled = false;
+                /* remove stdin filter from kqueue, then clear flags to avoid re-submitting */
+                changes[3].flags = libc::EV_DELETE;
+            } else if bytes_read > 0 {
+                /* got actual data - reset the idle timer */
+                let now_ns = precise_now_ns(confine)?;
+                if let Some(ref mut stdin_cfg) = stdin_timeout {
+                    stdin_cfg.last_activity_ns = now_ns;
+                }
+            }
+            /* bytes_read < 0: EAGAIN/EWOULDBLOCK or error - just continue */
+
+            /* re-register proc watcher (oneshot) */
+            changes[0].flags = libc::EV_ADD | libc::EV_ONESHOT;
+            continue;
+        }
+
         /* got an event - check if it's a heartbeat tick or something else */
-        if event.filter == libc::EVFILT_TIMER && heartbeat_interval_ns > 0 {
+        if event.filter == libc::EVFILT_TIMER {
             let now_ns = precise_now_ns(confine)?;
+
+            /* check stdin timeout first */
+            if let Some(ref stdin_cfg) = stdin_timeout {
+                let stdin_idle_ns = now_ns.saturating_sub(stdin_cfg.last_activity_ns);
+                if stdin_idle_ns >= stdin_timeout_ns {
+                    // SAFETY: kq is a valid fd
+                    unsafe { libc::close(kq) };
+                    return Ok(WaitResult::TimedOut(TimeoutReason::StdinIdle));
+                }
+            }
+
             /* heartbeat tick: we haven't reached deadline yet, timer fired for heartbeat */
-            if now_ns < deadline_ns && now_ns >= next_heartbeat_ns {
+            if heartbeat_interval_ns > 0 && now_ns < deadline_ns && now_ns >= next_heartbeat_ns {
                 /* print heartbeat message */
                 if let Some(ref hb) = heartbeat
                     && !hb.quiet
@@ -1135,17 +1299,48 @@ fn wait_with_kqueue(
                 changes[0].flags = libc::EV_ADD | libc::EV_ONESHOT;
                 continue;
             }
-        }
-        /* got a non-heartbeat result, exit loop */
-        break;
-    }
 
-    /* check for registration errors */
-    if (event.flags & libc::EV_ERROR) != 0 {
-        #[allow(clippy::cast_possible_truncation)]
-        let err_code = event.data as i32;
-        /* ESRCH = process gone, that's fine */
-        if err_code != libc::ESRCH {
+            /* wall clock deadline reached */
+            if now_ns >= deadline_ns {
+                // SAFETY: kq is a valid fd
+                unsafe { libc::close(kq) };
+                return Ok(WaitResult::TimedOut(TimeoutReason::WallClock));
+            }
+
+            /* timer fired for stdin timeout check - continue loop to recalculate */
+            changes[0].flags = libc::EV_ADD | libc::EV_ONESHOT;
+            continue;
+        }
+
+        /* check for registration errors inside loop */
+        if (event.flags & libc::EV_ERROR) != 0 {
+            #[allow(clippy::cast_possible_truncation)]
+            let err_code = event.data as i32;
+
+            /* EBADF on stdin (ident 0) - stdin became invalid, disable monitoring */
+            if err_code == libc::EBADF && event.ident == 0 {
+                stdin_timeout = None;
+                stdin_enabled = false;
+                /* remove stdin filter from kqueue */
+                changes[3].flags = libc::EV_DELETE;
+                changes[0].flags = libc::EV_ADD | libc::EV_ONESHOT;
+                continue;
+            }
+
+            /* ENOENT on stdin (ident 0) - filter doesn't exist (already deleted), ignore */
+            if err_code == libc::ENOENT && event.ident == 0 {
+                /* clear EV_DELETE flag since filter is gone */
+                changes[3].flags = 0;
+                changes[0].flags = libc::EV_ADD | libc::EV_ONESHOT;
+                continue;
+            }
+
+            /* ESRCH = process gone - break to handle below */
+            if err_code == libc::ESRCH {
+                break;
+            }
+
+            /* other errors are fatal */
             // SAFETY: kq is a valid fd
             unsafe { libc::close(kq) };
             return Err(TimeoutError::Internal(format!(
@@ -1153,21 +1348,32 @@ fn wait_with_kqueue(
                 err_code
             )));
         }
-        /* ESRCH - reap it */
-        // SAFETY: kq is a valid fd
-        unsafe { libc::close(kq) };
-        /* try non-blocking first, fall back to blocking wait */
-        match child.try_wait() {
-            Ok(Some((status, rusage))) => return Ok(WaitResult::Exited(status, rusage)),
-            Ok(None) | Err(_) => match child.wait() {
-                Ok((status, rusage)) => return Ok(WaitResult::Exited(status, rusage)),
-                Err(SpawnError::Wait(e)) if e == libc::ECHILD => {
-                    return Ok(WaitResult::TimedOut);
-                }
-                Err(e) => {
-                    return Err(TimeoutError::Internal(format!("wait failed: {}", e)));
-                }
-            },
+
+        /* got a non-heartbeat/non-stdin result, exit loop */
+        break;
+    }
+
+    /* handle ESRCH after loop exit */
+    if (event.flags & libc::EV_ERROR) != 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        let err_code = event.data as i32;
+        /* ESRCH = process gone, that's fine */
+        if err_code == libc::ESRCH {
+            // SAFETY: kq is a valid fd
+            unsafe { libc::close(kq) };
+            /* try non-blocking first, fall back to blocking wait */
+            match child.try_wait() {
+                Ok(Some((status, rusage))) => return Ok(WaitResult::Exited(status, rusage)),
+                Ok(None) | Err(_) => match child.wait() {
+                    Ok((status, rusage)) => return Ok(WaitResult::Exited(status, rusage)),
+                    Err(SpawnError::Wait(e)) if e == libc::ECHILD => {
+                        return Ok(WaitResult::TimedOut(TimeoutReason::WallClock));
+                    }
+                    Err(e) => {
+                        return Err(TimeoutError::Internal(format!("wait failed: {}", e)));
+                    }
+                },
+            }
         }
     }
 
@@ -1184,17 +1390,19 @@ fn wait_with_kqueue(
     }
 
     if event.filter == libc::EVFILT_READ {
-        /* Signal pipe became readable - a signal was received */
-        if let Some(fd) = signal_fd
-            && let Some(sig) = read_signal_from_pipe(fd)
-        {
-            return Ok(WaitResult::ReceivedSignal(sig));
-        }
-        /* Spurious wakeup or no data - treat as timeout since timer also fired
-         * or deadline passed. The caller will re-check the child status. */
+        /* signal pipe became readable - a signal was received */
+        let Some(fd) = signal_fd else {
+            /* spurious wakeup - treat as timeout */
+            return Ok(WaitResult::TimedOut(TimeoutReason::WallClock));
+        };
+        let Some(sig) = read_signal_from_pipe(fd) else {
+            /* pipe readable but no signal byte yet - treat as timeout */
+            return Ok(WaitResult::TimedOut(TimeoutReason::WallClock));
+        };
+        return Ok(WaitResult::ReceivedSignal(sig));
     }
 
-    Ok(WaitResult::TimedOut)
+    Ok(WaitResult::TimedOut(TimeoutReason::WallClock))
 }
 
 /*
@@ -1506,6 +1714,7 @@ mod tests {
             status: None,
             rusage: None,
             hook: None,
+            reason: TimeoutReason::WallClock,
         };
 
         assert_eq!(result.exit_code(false, 124), 124);
@@ -1520,6 +1729,7 @@ mod tests {
             status: None,
             rusage: None,
             hook: None,
+            reason: TimeoutReason::WallClock,
         };
 
         assert_eq!(result.exit_code(false, 124), 124);
@@ -1534,6 +1744,7 @@ mod tests {
             status: None,
             rusage: None,
             hook: None,
+            reason: TimeoutReason::WallClock,
         };
 
         assert_eq!(result.exit_code(false, 42), 42);
