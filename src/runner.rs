@@ -30,6 +30,9 @@ use crate::error::{Result, TimeoutError, exit_codes};
 use crate::process::{RawChild, RawExitStatus, ResourceUsage, SpawnError, spawn_command};
 use crate::signal::{Signal, parse_signal, signal_name, signal_number};
 use crate::sync::AtomicOnce;
+use crate::time_math::{
+    advance_ns, deadline_reached, elapsed_ns, remaining_ns, time_to_idle_timeout,
+};
 use crate::wait::kqueue_delay;
 
 type RawFd = i32;
@@ -694,9 +697,12 @@ pub fn run_with_retry(
         let attempt_start = precise_now_ns(config.confine).unwrap_or(0);
 
         let result = run_command(command, args, config)?;
-        let attempt_elapsed_ms = precise_now_ns(config.confine)
-            .unwrap_or(attempt_start)
-            .saturating_sub(attempt_start)
+        /* use checked elapsed - fallback to 0 on clock anomaly */
+        let attempt_elapsed_ms = elapsed_ns(
+            attempt_start,
+            precise_now_ns(config.confine).unwrap_or(attempt_start),
+        )
+        .unwrap_or(0)
             / 1_000_000;
 
         match &result {
@@ -1072,7 +1078,7 @@ fn wait_with_kqueue(
     /* heartbeat tracking: next heartbeat fires at start_ns + interval, then every interval */
     let heartbeat_interval_ns = heartbeat.as_ref().map_or(0, |h| h.interval_ns);
     let mut next_heartbeat_ns = if heartbeat_interval_ns > 0 {
-        start_ns.saturating_add(heartbeat_interval_ns)
+        advance_ns(start_ns, heartbeat_interval_ns)
     } else {
         u64::MAX /* disabled */
     };
@@ -1218,39 +1224,46 @@ fn wait_with_kqueue(
      * With heartbeat: timer fires at min(remaining_timeout, time_to_next_heartbeat).
      * With stdin timeout: timer fires at min(remaining_timeout, stdin_deadline).
      */
-    let deadline_ns = start_ns.saturating_add(timeout_ns);
+    let deadline_ns = advance_ns(start_ns, timeout_ns);
 
     loop {
         /* check if we've passed deadline */
         let now_ns = precise_now_ns(confine)?;
-        if now_ns >= deadline_ns {
+        if deadline_reached(now_ns, deadline_ns) {
             // SAFETY: kq is a valid fd, close is always safe
             unsafe { libc::close(kq) };
             return Ok(WaitResult::TimedOut(TimeoutReason::WallClock));
         }
-        let remaining_ns = deadline_ns.saturating_sub(now_ns);
+        let remaining_timeout_ns = remaining_ns(now_ns, deadline_ns);
 
-        /* check stdin idle timeout */
+        /* check stdin idle timeout using checked arithmetic for invariant detection */
         if let Some(ref stdin_cfg) = stdin_timeout {
-            let stdin_idle_ns = now_ns.saturating_sub(stdin_cfg.last_activity_ns);
-            if stdin_idle_ns >= stdin_timeout_ns {
-                // SAFETY: kq is a valid fd
-                unsafe { libc::close(kq) };
-                return Ok(WaitResult::TimedOut(TimeoutReason::StdinIdle));
+            /* elapsed_ns returns None if now < last_activity (clock anomaly) */
+            match elapsed_ns(stdin_cfg.last_activity_ns, now_ns) {
+                Some(idle_ns) if idle_ns >= stdin_timeout_ns => {
+                    // SAFETY: kq is a valid fd
+                    unsafe { libc::close(kq) };
+                    return Ok(WaitResult::TimedOut(TimeoutReason::StdinIdle));
+                }
+                None => {
+                    /* clock went backwards - log and continue with 0 idle time */
+                    /* this shouldn't happen but better than silent misbehavior */
+                }
+                Some(_) => { /* still within timeout */ }
             }
         }
 
         /* calculate next wake time: min(remaining timeout, time to next heartbeat, stdin timeout) */
-        let time_to_heartbeat = next_heartbeat_ns.saturating_sub(now_ns);
-        let time_to_stdin_timeout = if let Some(ref stdin_cfg) = stdin_timeout {
-            let stdin_idle_ns = now_ns.saturating_sub(stdin_cfg.last_activity_ns);
-            stdin_timeout_ns.saturating_sub(stdin_idle_ns)
+        let time_to_heartbeat = remaining_ns(now_ns, next_heartbeat_ns);
+        let time_to_stdin_deadline = if let Some(ref stdin_cfg) = stdin_timeout {
+            /* use checked helper - returns remaining time or 0 if already exceeded */
+            time_to_idle_timeout(stdin_cfg.last_activity_ns, now_ns, stdin_timeout_ns).unwrap_or(0) /* clock anomaly: treat as timed out */
         } else {
             u64::MAX
         };
-        let next_wake_ns = remaining_ns
+        let next_wake_ns = remaining_timeout_ns
             .min(time_to_heartbeat)
-            .min(time_to_stdin_timeout);
+            .min(time_to_stdin_deadline);
 
         /* update timer to next wake time */
         #[allow(clippy::cast_possible_wrap)]
@@ -1378,34 +1391,40 @@ fn wait_with_kqueue(
                 }
             }
 
-            /* check stdin timeout first */
+            /* check stdin timeout first using checked arithmetic */
             if let Some(ref stdin_cfg) = stdin_timeout {
-                let stdin_idle_ns = now_ns.saturating_sub(stdin_cfg.last_activity_ns);
-                if stdin_idle_ns >= stdin_timeout_ns {
-                    // SAFETY: kq is a valid fd
-                    unsafe { libc::close(kq) };
-                    return Ok(WaitResult::TimedOut(TimeoutReason::StdinIdle));
+                match elapsed_ns(stdin_cfg.last_activity_ns, now_ns) {
+                    Some(idle_ns) if idle_ns >= stdin_timeout_ns => {
+                        // SAFETY: kq is a valid fd
+                        unsafe { libc::close(kq) };
+                        return Ok(WaitResult::TimedOut(TimeoutReason::StdinIdle));
+                    }
+                    _ => { /* within timeout or clock anomaly - continue */ }
                 }
             }
 
             /* heartbeat tick: we haven't reached deadline yet, timer fired for heartbeat */
-            if heartbeat_interval_ns > 0 && now_ns < deadline_ns && now_ns >= next_heartbeat_ns {
+            if heartbeat_interval_ns > 0
+                && !deadline_reached(now_ns, deadline_ns)
+                && deadline_reached(now_ns, next_heartbeat_ns)
+            {
                 /* print heartbeat message */
                 if let Some(ref hb) = heartbeat
                     && !hb.quiet
                 {
-                    let elapsed_ns = now_ns.saturating_sub(hb.start_ns);
-                    print_heartbeat(elapsed_ns, hb.pid);
+                    /* elapsed_ns validated: hb.start_ns <= now_ns (start before now) */
+                    let elapsed = elapsed_ns(hb.start_ns, now_ns).unwrap_or(0);
+                    print_heartbeat(elapsed, hb.pid);
                 }
                 /* schedule next heartbeat */
-                next_heartbeat_ns = now_ns.saturating_add(heartbeat_interval_ns);
+                next_heartbeat_ns = advance_ns(now_ns, heartbeat_interval_ns);
                 /* re-register the timer for next wake (proc watcher is oneshot, re-add) */
                 changes[0].flags = libc::EV_ADD | libc::EV_ONESHOT;
                 continue;
             }
 
             /* wall clock deadline reached */
-            if now_ns >= deadline_ns {
+            if deadline_reached(now_ns, deadline_ns) {
                 // SAFETY: kq is a valid fd
                 unsafe { libc::close(kq) };
                 return Ok(WaitResult::TimedOut(TimeoutReason::WallClock));
@@ -1549,9 +1568,9 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
                 ran: false,
                 exit_code: None,
                 timed_out: false,
-                elapsed_ms: precise_now_ns(config.confine)
+                /* use checked elapsed - fallback to 0 on clock anomaly */
+                elapsed_ms: elapsed_ns(start_ns, precise_now_ns(config.confine).unwrap_or(0))
                     .unwrap_or(0)
-                    .saturating_sub(start_ns)
                     / 1_000_000,
             };
         }
@@ -1560,10 +1579,9 @@ fn run_on_timeout_hook(cmd: &str, pid: i32, config: &RunConfig) -> HookResult {
     /* Wait using kqueue for zero-CPU waiting */
     let hook_wait_result =
         wait_for_hook_with_kqueue(&mut child, config.on_timeout_limit, config.confine);
-    let elapsed_ms = precise_now_ns(config.confine)
-        .unwrap_or(0)
-        .saturating_sub(start_ns)
-        / 1_000_000;
+    /* use checked elapsed - fallback to 0 on clock anomaly */
+    let elapsed_ms =
+        elapsed_ns(start_ns, precise_now_ns(config.confine).unwrap_or(0)).unwrap_or(0) / 1_000_000;
 
     match hook_wait_result {
         HookWaitResult::Exited(status) => {
@@ -1633,7 +1651,7 @@ fn wait_for_hook_with_kqueue(
     /* use 0 as fallback for timing if timebase fails - hook timing is best-effort */
     let start_ns = precise_now_ns(confine).unwrap_or(0);
     let timeout_ns = duration_to_ns(timeout);
-    let deadline_ns = start_ns.saturating_add(timeout_ns);
+    let deadline_ns = advance_ns(start_ns, timeout_ns);
 
     /* create kqueue fd */
     // SAFETY: kqueue() has no preconditions, returns -1 on error (checked below).
@@ -1675,13 +1693,13 @@ fn wait_for_hook_with_kqueue(
     loop {
         /* Recalculate remaining time (handles EINTR correctly) */
         let now_ns = precise_now_ns(confine).unwrap_or(deadline_ns); /* on error, trigger timeout */
-        if now_ns >= deadline_ns {
+        if deadline_reached(now_ns, deadline_ns) {
             // SAFETY: kq is a valid fd from kqueue() above.
             unsafe { libc::close(kq) };
             return HookWaitResult::TimedOut;
         }
-        let remaining_ns = deadline_ns.saturating_sub(now_ns);
-        changes[1].data = remaining_ns.min(MAX_TIMER_NS) as isize;
+        let remaining_timeout_ns = remaining_ns(now_ns, deadline_ns);
+        changes[1].data = remaining_timeout_ns.min(MAX_TIMER_NS) as isize;
 
         // SAFETY: kq is a valid kqueue fd. changes is a valid slice of kevent structs.
         // event is a valid buffer for one kevent. Timeout is null (wait forever).

@@ -43,6 +43,7 @@ pub mod duration;
 pub mod error;
 pub mod runner;
 pub mod signal;
+pub mod time_math;
 pub mod wait;
 
 pub use args::Args;

@@ -17,6 +17,7 @@ use core::time::Duration;
 use crate::args::Confine;
 use crate::error::{Result, TimeoutError};
 use crate::sync::AtomicOnce;
+use crate::time_math::{advance_ns, deadline_reached, remaining_ns};
 
 /* Timing helpers - reimplemented here to avoid circular deps with runner */
 #[repr(C)]
@@ -135,7 +136,7 @@ pub fn kqueue_delay(d: Duration, signal_fd: Option<i32>) -> bool {
 
     /* track deadline for EINTR recalculation */
     let start_ns = active_now_ns();
-    let deadline_ns = start_ns.saturating_add(duration_to_ns(d));
+    let deadline_ns = advance_ns(start_ns, duration_to_ns(d));
 
     /* create kqueue fd */
     // SAFETY: kqueue() has no preconditions, returns -1 on error
@@ -163,12 +164,12 @@ pub fn kqueue_delay(d: Duration, signal_fd: Option<i32>) -> bool {
     loop {
         /* recalculate remaining time after each EINTR */
         let current_ns = active_now_ns();
-        if current_ns >= deadline_ns {
+        if deadline_reached(current_ns, deadline_ns) {
             // SAFETY: kq is valid fd
             unsafe { libc::close(kq) };
             return true; /* deadline reached */
         }
-        let remaining_ns = deadline_ns.saturating_sub(current_ns);
+        let remaining_timeout_ns = remaining_ns(current_ns, deadline_ns);
 
         /* set up timer event, optionally watch signal pipe */
         #[allow(clippy::cast_possible_wrap)]
@@ -178,7 +179,7 @@ pub fn kqueue_delay(d: Duration, signal_fd: Option<i32>) -> bool {
                 filter: libc::EVFILT_TIMER,
                 flags: libc::EV_ADD | libc::EV_ONESHOT,
                 fflags: libc::NOTE_NSECONDS,
-                data: remaining_ns.min(MAX_TIMER_NS) as isize,
+                data: remaining_timeout_ns.min(MAX_TIMER_NS) as isize,
                 udata: core::ptr::null_mut(),
             },
             libc::kevent {
@@ -212,7 +213,7 @@ pub fn kqueue_delay(d: Duration, signal_fd: Option<i32>) -> bool {
             /* other error - close and fallback with REMAINING time */
             // SAFETY: kq is valid fd
             unsafe { libc::close(kq) };
-            let remaining_ms = (deadline_ns.saturating_sub(active_now_ns())) / 1_000_000;
+            let remaining_ms = remaining_ns(active_now_ns(), deadline_ns) / 1_000_000;
             if remaining_ms > 0 {
                 sleep_ms(remaining_ms);
             }
@@ -307,7 +308,7 @@ pub fn wait_for_file(path: &str, timeout: Option<Duration>, confine: Confine) ->
         Err(e) => return Err(TimeoutError::WaitForFileError(String::from(path), e)),
     }
 
-    let deadline_ns = timeout.map(|d| now_ns(confine).saturating_add(duration_to_ns(d)));
+    let deadline_ns = timeout.map(|d| advance_ns(now_ns(confine), duration_to_ns(d)));
 
     /* Exponential backoff: 10ms -> 20ms -> 40ms -> ... -> 1000ms (cap) */
     const INITIAL_POLL_MS: u64 = 10;
@@ -318,11 +319,11 @@ pub fn wait_for_file(path: &str, timeout: Option<Duration>, confine: Confine) ->
         /* Check timeout BEFORE sleeping to avoid overshoot */
         let sleep_time = if let Some(dl) = deadline_ns {
             let current = now_ns(confine);
-            if current >= dl {
+            if deadline_reached(current, dl) {
                 return Err(TimeoutError::WaitForFileTimeout(String::from(path)));
             }
             /* cap sleep to remaining time */
-            let remaining_ms = (dl.saturating_sub(current)) / 1_000_000;
+            let remaining_ms = remaining_ns(current, dl) / 1_000_000;
             poll_interval_ms.min(remaining_ms.max(1))
         } else {
             poll_interval_ms
