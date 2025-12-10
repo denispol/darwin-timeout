@@ -125,9 +125,13 @@ Use Cases
 
 > **Note:** `--stdin-timeout` alone **consumes stdin data** to detect activity—the child won't receive it. This is ideal for detecting unexpected prompts in non-interactive CI.
 
-**Stream watchdog**: Monitor stdin activity without consuming the data stream. Useful for long-running pipelines where you want to detect stalls while preserving data flow to the child.
+**Stream watchdog**: Detect stalled data pipelines without consuming the stream. If upstream stops sending data for too long, kill the pipeline and alert. The child receives all data intact.
 
-    some-producer | timeout -S 30s --stdin-passthrough 1h some-consumer
+    # Database backup to S3 - fail if pg_dump stalls for 2 minutes
+    pg_dump mydb | timeout -S 2m --stdin-passthrough 4h gzip | aws s3 cp - s3://backups/db.sql.gz
+
+    # Log shipping - detect stuck log producers
+    kubectl logs -f deployment/app | timeout -S 30s --stdin-passthrough 24h ./ship-to-elk.sh
 
 > When stdin reaches EOF (e.g., `/dev/null`, closed pipe), stdin monitoring is automatically disabled and the wall clock timeout takes over.
 
