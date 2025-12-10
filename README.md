@@ -123,7 +123,7 @@ Use Cases
 
     timeout --stdin-timeout 5s ./test-suite  # fail if it prompts for input
 
-> **Note:** `--stdin-timeout` monitors the *parent's* stdin, not the child's. When stdin reaches EOF (e.g., `/dev/null`, closed pipe), stdin monitoring is automatically disabled and the wall clock timeout takes over. This prevents busy-loops and ensures predictable behavior in non-interactive environments.
+> **Note:** `--stdin-timeout` **consumes stdin data** to detect activity. It is intended for non-interactive environments to detect unexpected input prompts—not for monitoring active data streams piped to the child process. Use `--stdin-passthrough` alongside `--stdin-timeout` to detect idle without consuming the data. When stdin reaches EOF (e.g., `/dev/null`, closed pipe), stdin monitoring is automatically disabled and the wall clock timeout takes over.
 
 **CI keep-alive**: Many CI systems (GitHub Actions, GitLab CI, Travis) kill jobs that produce no output for 10-30 minutes. Long builds, test suites, or deployments can trigger this even when working correctly. The heartbeat flag prints periodic status messages to prevent these false timeouts:
 
@@ -160,7 +160,8 @@ Options
     -r, --retry N            retry command up to N times on timeout
     --retry-delay T          delay between retries (default: 0)
     --retry-backoff Nx       multiply delay by N each retry (e.g., 2x)
-    -S, --stdin-timeout T    kill command if stdin is idle for T (for interactive detection)
+    -S, --stdin-timeout T    kill command if stdin is idle for T (consumes stdin; for prompt detection)
+    --stdin-passthrough      non-consuming stdin idle detection (pair with -S)
 
 **Duration format:** number with optional suffix `ms` (milliseconds), `us`/`µs` (microseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Fractional values supported: `0.5s`, `1.5ms`, `100us`.
 

@@ -777,6 +777,99 @@ fn test_both_streams() {
 }
 
 /* =========================================================================
+ * STDIN PASSTHROUGH - non-consuming stdin watchdog
+ * ========================================================================= */
+
+#[test]
+fn test_stdin_passthrough_keeps_data_for_child() {
+    timeout_cmd()
+        .args(["--stdin-timeout", "5s", "--stdin-passthrough", "5s", "cat"])
+        .write_stdin("hello passthrough\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello passthrough"));
+}
+
+#[test]
+fn test_stdin_passthrough_times_out_on_idle() {
+    use std::process::{Command, Stdio};
+    use std::thread;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args([
+            "--stdin-timeout",
+            "0.2s",
+            "--stdin-passthrough",
+            "5s",
+            "sleep",
+            "10",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn timeout");
+
+    /* keep stdin open without writing to trigger idle timeout */
+    if let Some(stdin) = child.stdin.take() {
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(800));
+            drop(stdin);
+        });
+    }
+
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait for timeout");
+    assert_eq!(output.status.code(), Some(124));
+}
+
+#[test]
+fn test_stdin_passthrough_eof_no_false_timeout() {
+    /*
+     * When stdin pipe closes (EOF), passthrough mode should NOT report
+     * a stdin idle timeout. The command should run to completion.
+     * This tests EOF detection via POLLHUP in poll().
+     */
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_timeout"))
+        .args([
+            "--stdin-timeout",
+            "0.2s",
+            "--stdin-passthrough",
+            "5s",
+            "sh",
+            "-c",
+            /* read all input then sleep - stdin EOF should not cause idle timeout */
+            "cat > /dev/null; sleep 0.5",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn timeout");
+
+    /* send data immediately then close stdin */
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(b"data\n").expect("write failed");
+        /* stdin closes when dropped here */
+    }
+
+    /* command should succeed - not hit stdin idle timeout */
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait for timeout");
+    assert!(
+        output.status.success(),
+        "expected success after EOF, got exit code {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/* =========================================================================
  * REAL-WORLD SCENARIOS - Common use cases
  * ========================================================================= */
 

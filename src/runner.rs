@@ -523,6 +523,7 @@ pub struct RunConfig {
     pub retry_backoff: u32,              /* multiplier for delay each retry (1 = no backoff) */
     pub heartbeat: Option<Duration>,     /* print status to stderr at this interval */
     pub stdin_timeout: Option<Duration>, /* timeout if stdin has no activity */
+    pub stdin_passthrough: bool,         /* non-consuming stdin idle detection */
 }
 
 impl RunConfig {
@@ -587,6 +588,12 @@ impl RunConfig {
             .map(|s| parse_duration(s))
             .transpose()?;
 
+        if args.stdin_passthrough && stdin_timeout.is_none() {
+            return Err(TimeoutError::Internal(
+                "--stdin-passthrough requires --stdin-timeout".to_string(),
+            ));
+        }
+
         /* Warn if on-timeout-limit exceeds main timeout (when hook is set) */
         if args.on_timeout.is_some() && on_timeout_limit > timeout && !is_no_timeout(&timeout) {
             crate::eprintln!(
@@ -612,6 +619,7 @@ impl RunConfig {
             retry_backoff,
             heartbeat,
             stdin_timeout,
+            stdin_passthrough: args.stdin_passthrough,
         })
     }
 }
@@ -789,6 +797,11 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
     let stdin_timeout_config = config.stdin_timeout.map(|d| StdinTimeoutConfig {
         timeout_ns: duration_to_ns(d),
         last_activity_ns: start_ns,
+        mode: if config.stdin_passthrough {
+            StdinMode::Passthrough
+        } else {
+            StdinMode::Consume
+        },
     });
 
     /* wait for exit or timeout */
@@ -944,6 +957,13 @@ enum WaitResult {
 struct StdinTimeoutConfig {
     timeout_ns: u64,       /* stdin idle timeout in nanoseconds */
     last_activity_ns: u64, /* timestamp of last stdin activity */
+    mode: StdinMode,       /* consume vs passthrough */
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StdinMode {
+    Consume,
+    Passthrough,
 }
 
 /* heartbeat config for wait_with_kqueue */
@@ -991,6 +1011,42 @@ fn errno() -> i32 {
     }
 }
 
+/* stdin poll result - distinguishes readable from idle from closed */
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdinPollResult {
+    Readable, /* data available */
+    Idle,     /* no data, still open */
+    Eof,      /* pipe closed / hangup */
+}
+
+/* check stdin status without consuming data */
+#[inline]
+fn stdin_poll_status() -> StdinPollResult {
+    let mut pfd = libc::pollfd {
+        fd: 0,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+
+    // SAFETY: poll with nfds=1 and timeout=0 is safe for any fd value.
+    let ret = unsafe { libc::poll(&raw mut pfd, 1, 0) };
+
+    if ret <= 0 {
+        return StdinPollResult::Idle;
+    }
+
+    /* POLLHUP = writer closed the pipe, no more data coming */
+    if (pfd.revents & libc::POLLHUP) != 0 && (pfd.revents & libc::POLLIN) == 0 {
+        return StdinPollResult::Eof;
+    }
+
+    if (pfd.revents & libc::POLLIN) != 0 {
+        return StdinPollResult::Readable;
+    }
+
+    StdinPollResult::Idle
+}
+
 /*
  * wait using kqueue - EVFILT_PROC for exit, EVFILT_TIMER with NOTE_NSECONDS
  * for nanosecond precision, and optionally EVFILT_READ for signal pipe.
@@ -1028,7 +1084,6 @@ fn wait_with_kqueue(
     };
 
     /* stdin timeout tracking */
-    let stdin_timeout_ns = stdin_timeout.as_ref().map_or(0, |s| s.timeout_ns);
     /* validate stdin fd before enabling monitoring - fstat returns -1 if fd is invalid */
     let stdin_valid = if stdin_timeout.is_some() {
         // SAFETY: zeroed stat struct is valid for fstat call below
@@ -1045,8 +1100,31 @@ fn wait_with_kqueue(
     } else {
         false
     };
-    /* mutable: updated when stdin EOF/error disables monitoring */
-    let mut stdin_enabled = stdin_valid;
+    let stdin_timeout_ns = stdin_timeout.as_ref().map_or(0, |s| s.timeout_ns);
+    /* mutable: updated when stdin EOF/error disables monitoring.
+     * only consume mode registers stdin with kqueue - passthrough uses timer-based poll. */
+    let mut stdin_enabled = stdin_valid
+        && stdin_timeout
+            .as_ref()
+            .map(|s| matches!(s.mode, StdinMode::Consume))
+            .unwrap_or(false);
+
+    /* initial level check for passthrough mode to set activity timestamp */
+    if let Some(ref mut stdin_cfg) = stdin_timeout
+        && stdin_cfg.mode == StdinMode::Passthrough
+        && stdin_valid
+    {
+        match stdin_poll_status() {
+            StdinPollResult::Readable => {
+                stdin_cfg.last_activity_ns = precise_now_ns(confine)?;
+            }
+            StdinPollResult::Eof => {
+                /* stdin already closed - disable monitoring */
+                stdin_timeout = None;
+            }
+            StdinPollResult::Idle => { /* nothing to do */ }
+        }
+    }
 
     /* create kqueue fd */
     // SAFETY: kqueue() has no preconditions, returns -1 on error (checked below).
@@ -1100,7 +1178,7 @@ fn wait_with_kqueue(
             data: 0,
             udata: core::ptr::null_mut(),
         },
-        /* Stdin watcher (may be unused if no stdin timeout) */
+        /* Stdin watcher - consume mode only, passthrough uses timer-based poll */
         libc::kevent {
             ident: 0, /* stdin is fd 0 */
             filter: libc::EVFILT_READ,
@@ -1244,7 +1322,17 @@ fn wait_with_kqueue(
 
         /* handle stdin activity - reset the idle timer */
         if event.filter == libc::EVFILT_READ && event.ident == 0 && stdin_enabled {
-            /* drain any available data to prevent busy-loop - we just care about activity */
+            /* EV_EOF means stdin is gone - disable monitoring */
+            if (event.flags & libc::EV_EOF) != 0 {
+                stdin_timeout = None;
+                stdin_enabled = false;
+                changes[3].flags = libc::EV_DELETE;
+                changes[0].flags = libc::EV_ADD | libc::EV_ONESHOT;
+                continue;
+            }
+
+            /* consume mode only - passthrough never registers stdin with kqueue.
+             * drain any available data to prevent busy-loop - we just care about activity */
             let mut buf = [0u8; 1024];
             // SAFETY: read from stdin (fd 0) with valid buffer
             let bytes_read = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
@@ -1273,6 +1361,22 @@ fn wait_with_kqueue(
         /* got an event - check if it's a heartbeat tick or something else */
         if event.filter == libc::EVFILT_TIMER {
             let now_ns = precise_now_ns(confine)?;
+
+            /* passthrough mode: level check without consuming data */
+            if let Some(ref mut stdin_cfg) = stdin_timeout
+                && stdin_cfg.mode == StdinMode::Passthrough
+            {
+                match stdin_poll_status() {
+                    StdinPollResult::Readable => {
+                        stdin_cfg.last_activity_ns = now_ns;
+                    }
+                    StdinPollResult::Eof => {
+                        /* stdin closed - disable monitoring to prevent false idle timeout */
+                        stdin_timeout = None;
+                    }
+                    StdinPollResult::Idle => { /* nothing to do */ }
+                }
+            }
 
             /* check stdin timeout first */
             if let Some(ref stdin_cfg) = stdin_timeout {

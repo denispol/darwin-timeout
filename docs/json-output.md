@@ -127,6 +127,10 @@ The `timeout_reason` field distinguishes between:
 - `"wall_clock"`: Main timeout duration was exceeded
 - `"stdin_idle"`: No stdin activity for the duration specified by `-S/--stdin-timeout`
 
+**Note:** `--stdin-timeout` **consumes stdin data** to detect activity. It is intended for non-interactive environments to detect unexpected input prompts—not for monitoring active data streams piped to the child process.
+
+**Note:** Use `--stdin-passthrough` with `-S/--stdin-timeout` to detect idle without consuming data.
+
 **Note:** When stdin reaches EOF (e.g., from `/dev/null` or a closed pipe), stdin monitoring is automatically disabled to prevent busy-loops. In this case, the wall clock timeout will fire and `timeout_reason` will be `"wall_clock"` even if `--stdin-timeout` was specified.
 
 #### With --on-timeout hook

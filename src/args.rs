@@ -140,6 +140,7 @@ pub struct Args<'a> {
     pub retry_backoff: Option<ArgValue<'a>>,
     pub heartbeat: Option<ArgValue<'a>>,
     pub stdin_timeout: Option<ArgValue<'a>>,
+    pub stdin_passthrough: bool, /* non-consuming stdin watchdog */
     pub duration: Option<ArgValue<'a>>,
     pub command: Option<ArgValue<'a>>,
     pub args: Vec<ArgValue<'a>>,
@@ -166,6 +167,7 @@ pub struct OwnedArgs {
     pub retry_backoff: Option<String>,
     pub heartbeat: Option<String>,
     pub stdin_timeout: Option<String>,
+    pub stdin_passthrough: bool,
     pub duration: Option<String>,
     pub command: Option<String>,
     pub args: Vec<String>,
@@ -193,6 +195,7 @@ impl<'a> Args<'a> {
             retry_backoff: self.retry_backoff.map(|v| v.into_owned()),
             heartbeat: self.heartbeat.map(|v| v.into_owned()),
             stdin_timeout: self.stdin_timeout.map(|v| v.into_owned()),
+            stdin_passthrough: self.stdin_passthrough,
             duration: self.duration.map(|v| v.into_owned()),
             command: self.command.map(|v| v.into_owned()),
             args: self.args.into_iter().map(|v| v.into_owned()).collect(),
@@ -497,6 +500,10 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                 result.stdin_timeout = Some(ArgValue::Borrowed(&s[16..]));
             }
 
+            "--stdin-passthrough" => {
+                result.stdin_passthrough = true;
+            }
+
             /* unknown long option */
             s if s.starts_with("--") => {
                 return Err(ParseError {
@@ -738,6 +745,7 @@ Options:
   -H, --heartbeat <DURATION>      Print status to stderr at regular intervals (for CI)
                                   [env: TIMEOUT_HEARTBEAT]
   -S, --stdin-timeout <DURATION>  Kill command if stdin has no activity for DURATION
+      --stdin-passthrough         Use non-consuming stdin idle detection (paired with -S)
                                   [env: TIMEOUT_STDIN_TIMEOUT]
       --json                      Output result as JSON (for scripting/CI)
   -h, --help                      Print help
@@ -1213,6 +1221,22 @@ mod tests {
     fn test_stdin_timeout_long_flag() {
         let args = try_parse_from(["timeout", "--stdin-timeout", "30s", "5s", "cmd"]).unwrap();
         assert_eq!(args.stdin_timeout, Some("30s".to_string()));
+    }
+
+    #[test]
+    fn test_stdin_passthrough_flag() {
+        let args = try_parse_from([
+            "timeout",
+            "--stdin-timeout",
+            "10s",
+            "--stdin-passthrough",
+            "5s",
+            "cmd",
+        ])
+        .unwrap();
+
+        assert!(args.stdin_passthrough);
+        assert_eq!(args.stdin_timeout, Some("10s".to_string()));
     }
 
     #[test]
