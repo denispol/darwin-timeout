@@ -125,15 +125,22 @@ Use Cases
 
 > **Note:** `--stdin-timeout` alone **consumes stdin data** to detect activity—the child won't receive it. This is ideal for detecting unexpected prompts in non-interactive CI.
 
-**Stream watchdog**: Detect stalled data pipelines without consuming the stream. If upstream stops sending data for too long, kill the pipeline and alert. The child receives all data intact.
+**Stream watchdog**: Detect stalled data pipelines without consuming the stream. If upstream stops sending data for too long, kill the pipeline. The child receives all data intact, which is perfect for production backup and log shipping pipelines.
 
-    # Database backup to S3 - fail if pg_dump stalls for 2 minutes
-    pg_dump mydb | timeout -S 2m --stdin-passthrough 4h gzip | aws s3 cp - s3://backups/db.sql.gz
+    # Database backup: kill if pg_dump stalls for 2+ minutes
+    # Protects against database locks, network issues, or hung queries
+    pg_dump mydb | timeout -S 2m --stdin-passthrough 4h gzip | \
+        aws s3 cp - s3://backups/db-$(date +%Y%m%d).sql.gz
 
-    # Log shipping - detect stuck log producers
-    kubectl logs -f deployment/app | timeout -S 30s --stdin-passthrough 24h ./ship-to-elk.sh
+    # Kubernetes log shipping: fail if pod stops emitting logs for 30s
+    # Catches crashed pods, network issues, or stuck log tails
+    kubectl logs -f deployment/app --since=10m | \
+        timeout -S 30s --stdin-passthrough 24h ./ship-to-elasticsearch.sh
 
-> When stdin reaches EOF (e.g., `/dev/null`, closed pipe), stdin monitoring is automatically disabled and the wall clock timeout takes over.
+    # Real-time data sync: abort if upstream stops sending for 5 minutes
+    nc data-source 9000 | timeout -S 5m --stdin-passthrough 48h ./process-stream.sh
+
+> **How it works:** The timer resets on every stdin activity. When stdin reaches EOF (closed pipe), monitoring stops and wall clock timeout takes over. Data flows to the child untouched.
 
 **CI keep-alive**: Many CI systems (GitHub Actions, GitLab CI, Travis) kill jobs that produce no output for 10-30 minutes. Long builds, test suites, or deployments can trigger this even when working correctly. The heartbeat flag prints periodic status messages to prevent these false timeouts:
 
