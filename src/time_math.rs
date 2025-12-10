@@ -23,23 +23,12 @@
  * or arguments swapped). Callers should handle this as a bug, not silently
  * clamp to 0 like saturating_sub would.
  *
- * Uses u64::checked_signed_diff (stabilized 1.90.0) which returns Option<i64>.
- * Since we expect now >= start, a negative result indicates an error.
+ * Uses u64::checked_sub which returns None only when now < start,
+ * correctly handling all valid u64 time differences.
  */
 #[inline]
-pub fn elapsed_ns(start_ns: u64, now_ns: u64) -> Option<u64> {
-    /* checked_signed_diff returns Some(diff) where diff = self - other as i64 */
-    /* if diff would overflow i64 (> 2^63-1), returns None */
-    /* if diff is negative, the i64 is negative */
-    now_ns.checked_signed_diff(start_ns).and_then(|diff| {
-        if diff >= 0 {
-            /* safe: non-negative i64 always fits in u64 */
-            Some(diff as u64)
-        } else {
-            /* now < start: invariant violation */
-            None
-        }
-    })
+pub const fn elapsed_ns(start_ns: u64, now_ns: u64) -> Option<u64> {
+    now_ns.checked_sub(start_ns)
 }
 
 /*
@@ -101,8 +90,15 @@ pub const fn adjust_ns(base_ns: u64, offset_ns: i64) -> Option<u64> {
  * silently returning "not idle" due to saturating_sub clamping to 0.
  */
 #[inline]
-pub fn idle_timeout_exceeded(last_activity_ns: u64, now_ns: u64, timeout_ns: u64) -> Option<bool> {
-    elapsed_ns(last_activity_ns, now_ns).map(|idle_ns| idle_ns >= timeout_ns)
+pub const fn idle_timeout_exceeded(
+    last_activity_ns: u64,
+    now_ns: u64,
+    timeout_ns: u64,
+) -> Option<bool> {
+    match elapsed_ns(last_activity_ns, now_ns) {
+        Some(idle_ns) => Some(idle_ns >= timeout_ns),
+        None => None,
+    }
 }
 
 /*
@@ -114,8 +110,15 @@ pub fn idle_timeout_exceeded(last_activity_ns: u64, now_ns: u64, timeout_ns: u64
  * - None if now < last_activity (invariant violation)
  */
 #[inline]
-pub fn time_to_idle_timeout(last_activity_ns: u64, now_ns: u64, timeout_ns: u64) -> Option<u64> {
-    elapsed_ns(last_activity_ns, now_ns).map(|idle_ns| timeout_ns.saturating_sub(idle_ns))
+pub const fn time_to_idle_timeout(
+    last_activity_ns: u64,
+    now_ns: u64,
+    timeout_ns: u64,
+) -> Option<u64> {
+    match elapsed_ns(last_activity_ns, now_ns) {
+        Some(idle_ns) => Some(timeout_ns.saturating_sub(idle_ns)),
+        None => None,
+    }
 }
 
 #[cfg(test)]
@@ -151,12 +154,12 @@ mod tests {
     }
 
     #[test]
-    fn test_elapsed_ns_overflow_i64() {
-        /* difference exceeds i64::MAX - checked_signed_diff returns None */
+    fn test_elapsed_ns_large_delta() {
+        /* difference exceeds i64::MAX but is valid u64 - should succeed */
         let start = 0;
         let now = i64::MAX as u64 + 100;
-        /* this should return None because the diff can't fit in i64 */
-        assert!(elapsed_ns(start, now).is_none());
+        /* checked_sub correctly handles this, unlike checked_signed_diff */
+        assert_eq!(elapsed_ns(start, now), Some(now));
     }
 
     #[test]
