@@ -55,18 +55,22 @@ jobs:
 
   # Kani: formal verification for safety-critical modules
   # Auto-triggered when: sync.rs, process.rs, throttle.rs, proc_info.rs, time_math.rs
+  # Runs on macOS since code uses darwin-specific APIs (kqueue, mach_continuous_time)
   kani:
     name: Kani Proofs (19)
     needs: changes
     if: ${{ needs.changes.outputs.kani == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install Kani
-        uses: model-checking/kani-github-action@v1
-        with:
-          kani-version: latest
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
 
       - name: Run Kani proofs
         run: cargo kani
