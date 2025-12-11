@@ -349,8 +349,13 @@ Development
 -----------
 
     cargo test                  # run tests
+    cargo test --test proptest  # property-based tests
     cargo clippy                # lint
-    ./scripts/benchmark.sh      # run benchmarks
+    ./scripts/verify-all.sh     # full verification suite
+
+**Contributing:** See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, verification requirements, and the testing pyramid.
+
+**Verification:** This project uses five verification methods: unit tests, integration tests, proptest, cargo-fuzz, and kani formal proofs. See [docs/VERIFICATION.md](docs/VERIFICATION.md) for details.
 
 Library usage coming soon; core timeout logic will be available as a crate.
 
