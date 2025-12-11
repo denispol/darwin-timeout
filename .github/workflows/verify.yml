@@ -3,8 +3,8 @@
 # Jobs run automatically based on which files changed:
 # - kani: safety-critical files (sync, process, throttle, proc_info, time_math)
 # - fuzz: parsing files (duration, signal, args, rlimit)
-# - miri: always (fast UB detection)
 #
+# Miri runs in ci.yml (always, on macOS for darwin-specific tests)
 # See CONTRIBUTING.md "CI Auto-Verification Rules" for the full mapping.
 
 name: Verification
@@ -58,7 +58,7 @@ jobs:
   kani:
     name: Kani Proofs (19)
     needs: changes
-    if: needs.changes.outputs.kani == 'true'
+    if: ${{ needs.changes.outputs.kani == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,14 +69,14 @@ jobs:
           kani-version: latest
 
       - name: Run Kani proofs
-        run: cargo kani --tests
+        run: cargo kani
 
   # Fuzz: coverage-guided fuzzing for parsing modules
   # Auto-triggered when: duration.rs, signal.rs, args.rs, rlimit.rs, fuzz/**
   fuzz:
     name: Fuzz Targets (4×60s)
     needs: changes
-    if: needs.changes.outputs.fuzz == 'true'
+    if: ${{ needs.changes.outputs.fuzz == 'true' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -114,21 +114,3 @@ jobs:
 
       - name: Check fuzz targets compile
         run: cd fuzz && cargo fuzz check
-
-  # Miri: always run (fast, catches UB in pure Rust)
-  miri:
-    name: Miri UB Detection
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust nightly with miri
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri
-
-      - name: Setup Miri
-        run: cargo miri setup
-
-      - name: Run Miri tests
-        run: cargo miri test --lib

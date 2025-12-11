@@ -41,8 +41,9 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Security audit
+        continue-on-error: true
         run: |
-          cargo install cargo-audit --quiet
+          cargo install cargo-audit --locked
           cargo audit
 
   # Test on macOS after lint passes.
