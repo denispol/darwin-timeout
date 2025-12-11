@@ -142,7 +142,7 @@ pub struct Args<'a> {
     pub stdin_timeout: Option<ArgValue<'a>>,
     pub stdin_passthrough: bool, /* non-consuming stdin watchdog */
     pub mem_limit: Option<ArgValue<'a>>, /* e.g. 1G */
-    pub cpu_time: Option<ArgValue<'a>>,  /* cpu seconds via rlimit */
+    pub cpu_time: Option<ArgValue<'a>>, /* cpu seconds via rlimit */
     pub cpu_percent: Option<ArgValue<'a>>, /* cpu throttling percentage */
     pub duration: Option<ArgValue<'a>>,
     pub command: Option<ArgValue<'a>>,

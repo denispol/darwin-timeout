@@ -14,7 +14,7 @@ use crate::error::{Result, TimeoutError};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ResourceLimits {
-    pub mem_bytes: Option<u64>, /* RLIMIT_AS */
+    pub mem_bytes: Option<u64>,     /* RLIMIT_AS */
     pub cpu_time: Option<Duration>, /* RLIMIT_CPU (seconds) */
 }
 
@@ -33,9 +33,8 @@ pub fn parse_mem_limit(input: &str) -> Result<u64> {
     }
 
     let (num, suffix) = split_number_suffix(s);
-    let value = parse_u64(num).map_err(|_| {
-        TimeoutError::InvalidMemoryLimit(format!("invalid memory value: '{s}'"))
-    })?;
+    let value = parse_u64(num)
+        .map_err(|_| TimeoutError::InvalidMemoryLimit(format!("invalid memory value: '{s}'")))?;
 
     let mult: u64 = match suffix.to_ascii_lowercase().as_str() {
         "" | "b" => 1,
@@ -49,7 +48,7 @@ pub fn parse_mem_limit(input: &str) -> Result<u64> {
         _ => {
             return Err(TimeoutError::InvalidMemoryLimit(format!(
                 "invalid memory suffix in '{s}'"
-            )))
+            )));
         }
     };
 
@@ -71,7 +70,7 @@ pub fn parse_cpu_percent(input: &str) -> Result<NonZeroU32> {
         .trim()
         .parse()
         .map_err(|_| TimeoutError::InvalidCpuPercent(format!("invalid cpu percent: '{input}'")))?;
-    
+
     if val == 0 {
         return Err(TimeoutError::InvalidCpuPercent(format!(
             "cpu percent must be > 0: {val}"
@@ -89,6 +88,8 @@ pub fn apply_limits(limits: &ResourceLimits) -> Result<()> {
             rlim_cur: bytes,
             rlim_max: bytes,
         };
+        /* try RLIMIT_AS (fails on macOS with EINVAL but we try anyway) */
+        // SAFETY: setrlimit with valid rlimit struct
         let ret = unsafe { libc::setrlimit(libc::RLIMIT_AS, &rlim) };
         if ret != 0 {
             /* EINVAL on macOS is expected - silently continue.
@@ -107,6 +108,8 @@ pub fn apply_limits(limits: &ResourceLimits) -> Result<()> {
             rlim_cur: secs,
             rlim_max: secs,
         };
+        /* RLIMIT_CPU works on macOS */
+        // SAFETY: setrlimit with valid rlimit struct
         let ret = unsafe { libc::setrlimit(libc::RLIMIT_CPU, &rlim) };
         if ret != 0 {
             return Err(TimeoutError::ResourceLimitError(errno()));
@@ -164,14 +167,14 @@ fn errno() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_parse_cpu_percent_basic() {
         assert_eq!(parse_cpu_percent("50").unwrap().get(), 50);
         assert_eq!(parse_cpu_percent("100").unwrap().get(), 100);
         assert_eq!(parse_cpu_percent("1").unwrap().get(), 1);
     }
-    
+
     #[test]
     fn test_parse_cpu_percent_multicore() {
         /* multi-core values should be allowed */
@@ -179,12 +182,12 @@ mod tests {
         assert_eq!(parse_cpu_percent("400").unwrap().get(), 400);
         assert_eq!(parse_cpu_percent("1400").unwrap().get(), 1400); /* 14-core M4 Pro */
     }
-    
+
     #[test]
     fn test_parse_cpu_percent_zero_rejected() {
         assert!(parse_cpu_percent("0").is_err());
     }
-    
+
     #[test]
     fn test_parse_cpu_percent_invalid() {
         assert!(parse_cpu_percent("").is_err());
@@ -192,13 +195,13 @@ mod tests {
         assert!(parse_cpu_percent("-50").is_err());
         assert!(parse_cpu_percent("50%").is_err());
     }
-    
+
     #[test]
     fn test_parse_cpu_percent_whitespace() {
         assert_eq!(parse_cpu_percent("  50  ").unwrap().get(), 50);
         assert_eq!(parse_cpu_percent("\t100\n").unwrap().get(), 100);
     }
-    
+
     #[test]
     fn test_parse_mem_limit_basic() {
         assert_eq!(parse_mem_limit("1024").unwrap(), 1024);
@@ -206,7 +209,7 @@ mod tests {
         assert_eq!(parse_mem_limit("1M").unwrap(), 1024 * 1024);
         assert_eq!(parse_mem_limit("1G").unwrap(), 1024 * 1024 * 1024);
     }
-    
+
     #[test]
     fn test_parse_mem_limit_case_insensitive() {
         assert_eq!(parse_mem_limit("1k").unwrap(), 1024);
@@ -215,7 +218,7 @@ mod tests {
         assert_eq!(parse_mem_limit("512MB").unwrap(), 512 * 1024 * 1024);
         assert_eq!(parse_mem_limit("2gb").unwrap(), 2 * 1024 * 1024 * 1024);
     }
-    
+
     #[test]
     fn test_parse_mem_limit_zero() {
         /* zero is technically valid (no limit), but useless */

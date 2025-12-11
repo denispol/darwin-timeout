@@ -27,7 +27,9 @@ use core::time::Duration;
 use crate::args::{Confine, OwnedArgs};
 use crate::duration::{is_no_timeout, parse_duration};
 use crate::error::{Result, TimeoutError, exit_codes};
-use crate::process::{RawChild, RawExitStatus, ResourceUsage, SpawnError, spawn_command, spawn_command_with_limits};
+use crate::process::{
+    RawChild, RawExitStatus, ResourceUsage, SpawnError, spawn_command, spawn_command_with_limits,
+};
 use crate::rlimit::{ResourceLimits, parse_cpu_percent, parse_cpu_time, parse_mem_limit};
 use crate::signal::{Signal, parse_signal, signal_name, signal_number};
 use crate::sync::AtomicOnce;
@@ -438,8 +440,8 @@ pub enum RunResult {
         killed: bool,
         status: Option<RawExitStatus>,
         rusage: Option<ResourceUsage>,
-        limit_bytes: u64,         /* the limit that was exceeded */
-        actual_bytes: u64,        /* memory usage when limit was hit */
+        limit_bytes: u64,  /* the limit that was exceeded */
+        actual_bytes: u64, /* memory usage when limit was hit */
     },
     SignalForwarded {
         /* we got SIGTERM/SIGINT/SIGHUP, passed it on */
@@ -495,7 +497,12 @@ impl RunResult {
                     timeout_exit_code
                 }
             }
-            Self::MemoryLimitExceeded { signal, killed, status, .. } => {
+            Self::MemoryLimitExceeded {
+                signal,
+                killed,
+                status,
+                ..
+            } => {
                 /* same as timeout - memory limit is a resource limit timeout */
                 if preserve_status {
                     status.map_or_else(
@@ -655,13 +662,14 @@ impl RunConfig {
             .transpose()?;
 
         /* warn if cpu-percent is very low - may cause stuttery execution */
-        if let Some(ref pct) = cpu_throttle {
-            if pct.get() < 10 && !args.quiet {
-                crate::eprintln!(
-                    "warning: --cpu-percent {} is very low; may cause stuttery execution",
-                    pct.get()
-                );
-            }
+        if let Some(ref pct) = cpu_throttle
+            && pct.get() < 10
+            && !args.quiet
+        {
+            crate::eprintln!(
+                "warning: --cpu-percent {} is very low; may cause stuttery execution",
+                pct.get()
+            );
         }
 
         let cpu_throttle = cpu_throttle.map(|percent| CpuThrottleConfig {
@@ -912,10 +920,13 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
     });
 
     /* build memory limit config if enabled */
-    let memory_limit_config = config.limits.mem_bytes.map(|limit_bytes| MemoryLimitConfig {
-        limit_bytes,
-        check_interval_ns: duration_to_ns(Duration::from_millis(100)), /* poll every 100ms */
-    });
+    let memory_limit_config = config
+        .limits
+        .mem_bytes
+        .map(|limit_bytes| MemoryLimitConfig {
+            limit_bytes,
+            check_interval_ns: duration_to_ns(Duration::from_millis(100)), /* poll every 100ms */
+        });
 
     /* wait for exit or timeout */
     let exit_result = wait_with_kqueue(
@@ -960,23 +971,27 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
                 rusage,
             });
         }
-        WaitResult::MemoryLimitExceeded { limit_bytes, actual_bytes } => {
+        WaitResult::MemoryLimitExceeded {
+            limit_bytes,
+            actual_bytes,
+        } => {
             /* memory limit exceeded - kill process and return error */
             if config.verbose && !config.quiet {
                 crate::eprintln!(
                     "timeout: memory limit exceeded ({} bytes > {} bytes limit)",
-                    actual_bytes, limit_bytes
+                    actual_bytes,
+                    limit_bytes
                 );
             }
-            
+
             /* resume if throttle had it stopped - prevents deadlock */
             if let Some(ref mut ctx) = throttle_ctx {
                 ctx.state.resume();
             }
-            
+
             /* send SIGTERM first */
             send_signal(pid, config.signal, config.foreground)?;
-            
+
             /* wait for child with kill_after grace period if configured */
             if let Some(kill_after) = config.kill_after {
                 /* throttle disabled - process needs to run signal handler */
@@ -990,7 +1005,7 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
                     None, /* throttle disabled during grace period */
                     None, /* no memory limit during grace period */
                 )?;
-                
+
                 match grace_result {
                     WaitResult::Exited(status, rusage) => {
                         return Ok(RunResult::MemoryLimitExceeded {
@@ -1288,6 +1303,7 @@ fn stdin_poll_status() -> StdinPollResult {
  * With stdin timeout: adds EVFILT_READ on fd 0, resets timer on activity,
  * triggers if stdin is idle for the specified duration.
  */
+#[allow(clippy::too_many_arguments)]
 fn wait_with_kqueue(
     child: &mut RawChild,
     pid: i32,
@@ -1316,7 +1332,9 @@ fn wait_with_kqueue(
     };
 
     /* memory limit tracking */
-    let memory_check_interval_ns = memory_limit.as_ref().map_or(u64::MAX, |m| m.check_interval_ns);
+    let memory_check_interval_ns = memory_limit
+        .as_ref()
+        .map_or(u64::MAX, |m| m.check_interval_ns);
     let mut next_memory_check_ns = if memory_check_interval_ns < u64::MAX {
         advance_ns(start_ns, memory_check_interval_ns)
     } else {
@@ -1639,15 +1657,15 @@ fn wait_with_kqueue(
             if let Some(ref mem_cfg) = memory_limit
                 && deadline_reached(now_ns, next_memory_check_ns)
             {
-                if let Some(current_bytes) = crate::proc_info::get_process_memory(pid) {
-                    if current_bytes > mem_cfg.limit_bytes {
-                        // SAFETY: kq is a valid fd
-                        unsafe { libc::close(kq) };
-                        return Ok(WaitResult::MemoryLimitExceeded {
-                            limit_bytes: mem_cfg.limit_bytes,
-                            actual_bytes: current_bytes,
-                        });
-                    }
+                if let Some(current_bytes) = crate::proc_info::get_process_memory(pid)
+                    && current_bytes > mem_cfg.limit_bytes
+                {
+                    // SAFETY: kq is a valid fd
+                    unsafe { libc::close(kq) };
+                    return Ok(WaitResult::MemoryLimitExceeded {
+                        limit_bytes: mem_cfg.limit_bytes,
+                        actual_bytes: current_bytes,
+                    });
                 }
                 next_memory_check_ns = advance_ns(now_ns, memory_check_interval_ns);
             }

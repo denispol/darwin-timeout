@@ -61,7 +61,9 @@ impl fmt::Display for TimeoutError {
             Self::SpawnError(errno) => write!(f, "failed to spawn process: errno {errno}"),
             Self::SignalError(errno) => write!(f, "signal error: errno {errno}"),
             Self::ProcessGroupError(s) => write!(f, "process group error: {s}"),
-            Self::ResourceLimitError(errno) => write!(f, "failed to apply resource limits: errno {errno}"),
+            Self::ResourceLimitError(errno) => {
+                write!(f, "failed to apply resource limits: errno {errno}")
+            }
             Self::ThrottleAttachError(errno) => {
                 write!(f, "failed to attach CPU throttle: kern_return {errno}")
             }

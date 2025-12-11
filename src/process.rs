@@ -428,6 +428,8 @@ pub fn spawn_command_with_limits(
     }
     argv_ptrs.push(ptr::null());
 
+    /* fork into parent and child */
+    // SAFETY: fork() is safe - creates child process. returns pid in parent, 0 in child.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         return Err(SpawnError::Spawn(errno()));
@@ -440,25 +442,23 @@ pub fn spawn_command_with_limits(
             unsafe { libc::setpgid(0, 0) };
         }
 
-        if !limits.is_empty() {
-            if apply_limits(limits).is_err() {
-                unsafe { libc::_exit(125) };
-            }
+        /* apply resource limits before exec */
+        if !limits.is_empty() && apply_limits(limits).is_err() {
+            // SAFETY: _exit terminates child process immediately
+            unsafe { libc::_exit(125) };
         }
 
         // SAFETY: execvp with valid argv pointers. On failure, returns -1.
-        let ret = unsafe { libc::execvp(cmd_cstr.as_ptr(), argv_ptrs.as_ptr() as *const *const c_char) };
+        let ret = unsafe { libc::execvp(cmd_cstr.as_ptr(), argv_ptrs.as_ptr()) };
         if ret < 0 {
             let e = errno();
             let code = if e == ENOENT { 127 } else { 126 };
+            // SAFETY: _exit terminates child process with error code
             unsafe { libc::_exit(code) };
         }
     }
 
-    Ok(RawChild {
-        pid,
-        exited: false,
-    })
+    Ok(RawChild { pid, exited: false })
 }
 
 /* get errno - on macOS this is a thread-local via __error() */

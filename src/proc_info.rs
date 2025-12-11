@@ -12,8 +12,8 @@
  * we allocate 512 bytes for future-proofing against v5/v6 additions.
  */
 
-use alloc::format;
 use crate::error::{Result, TimeoutError};
+use alloc::format;
 
 const RUSAGE_BUFFER_SIZE: usize = 512;
 const RUSAGE_INFO_V4: i32 = 4;
@@ -31,8 +31,8 @@ const RUSAGE_INFO_V4: i32 = 4;
  * offset 64: ri_resident_size      = 16 + 6*8
  * offset 72: ri_phys_footprint     = 16 + 7*8  <-- memory metric
  */
-const OFFSET_USER_TIME: usize = 16;      /* 16 + 0*8 */
-const OFFSET_SYSTEM_TIME: usize = 24;    /* 16 + 1*8 */
+const OFFSET_USER_TIME: usize = 16; /* 16 + 0*8 */
+const OFFSET_SYSTEM_TIME: usize = 24; /* 16 + 1*8 */
 const OFFSET_PHYS_FOOTPRINT: usize = 72; /* 16 + 7*8 */
 
 /* force alignment to 8 bytes to match uint64_t alignment requirements.
@@ -42,11 +42,7 @@ const OFFSET_PHYS_FOOTPRINT: usize = 72; /* 16 + 7*8 */
 struct AlignedBuffer([u8; RUSAGE_BUFFER_SIZE]);
 
 unsafe extern "C" {
-    fn proc_pid_rusage(
-        pid: i32,
-        flavor: i32,
-        buffer: *mut u8,
-    ) -> i32;
+    fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u8) -> i32;
 }
 
 /* read u64 from buffer at offset (little-endian on arm64/x86_64) */
@@ -61,17 +57,17 @@ fn read_u64(buf: &[u8; RUSAGE_BUFFER_SIZE], offset: usize) -> u64 {
 fn get_rusage_raw(pid: i32) -> Option<[u8; RUSAGE_BUFFER_SIZE]> {
     /* use aligned wrapper - kernel expects u64-aligned buffer */
     let mut aligned = AlignedBuffer([0u8; RUSAGE_BUFFER_SIZE]);
-    
+
     // SAFETY: proc_pid_rusage writes to buffer. we provide 512 bytes which
     // is more than any known rusage_info version needs (~304 bytes for v4).
     // this guards against kernel writing extra bytes in newer macOS versions.
     // buffer is 8-byte aligned via AlignedBuffer wrapper.
     let ret = unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V4, aligned.0.as_mut_ptr()) };
-    
+
     if ret < 0 {
         return None;
     }
-    
+
     Some(aligned.0)
 }
 
@@ -91,10 +87,9 @@ pub fn get_process_cpu_time(pid: i32) -> Option<u64> {
 
 /* get both memory and CPU time in one call for efficiency */
 pub fn get_process_stats(pid: i32) -> Result<ProcessStats> {
-    let buf = get_rusage_raw(pid).ok_or_else(|| {
-        TimeoutError::Internal(format!("proc_pid_rusage failed for pid {}", pid))
-    })?;
-    
+    let buf = get_rusage_raw(pid)
+        .ok_or_else(|| TimeoutError::Internal(format!("proc_pid_rusage failed for pid {}", pid)))?;
+
     Ok(ProcessStats {
         memory_bytes: read_u64(&buf, OFFSET_PHYS_FOOTPRINT),
         cpu_time_ns: read_u64(&buf, OFFSET_USER_TIME)
@@ -112,29 +107,32 @@ pub struct ProcessStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_get_process_memory_self() {
         /* we should be able to get our own memory usage */
+        // SAFETY: getpid() always succeeds
         let pid = unsafe { libc::getpid() };
         let mem = get_process_memory(pid);
         assert!(mem.is_some(), "should get memory for self");
         /* sanity: process should use at least 1MB */
         assert!(mem.unwrap() > 1_000_000, "memory should be > 1MB");
     }
-    
+
     #[test]
     fn test_get_process_cpu_time_self() {
         /* we should be able to get our own cpu time */
+        // SAFETY: getpid() always succeeds
         let pid = unsafe { libc::getpid() };
         let cpu = get_process_cpu_time(pid);
         assert!(cpu.is_some(), "should get cpu time for self");
         /* cpu time should be positive (we've been running) */
         assert!(cpu.unwrap() > 0, "cpu time should be > 0");
     }
-    
+
     #[test]
     fn test_get_process_stats_self() {
+        // SAFETY: getpid() always succeeds
         let pid = unsafe { libc::getpid() };
         let stats = get_process_stats(pid);
         assert!(stats.is_ok(), "should get stats for self");
@@ -142,7 +140,7 @@ mod tests {
         assert!(stats.memory_bytes > 1_000_000);
         assert!(stats.cpu_time_ns > 0);
     }
-    
+
     #[test]
     fn test_invalid_pid() {
         /* pid -1 should fail */
