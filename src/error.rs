@@ -24,6 +24,7 @@ pub mod exit_codes {
 
 /* everything that can go wrong */
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TimeoutError {
     InvalidDuration(String),
     NegativeDuration,

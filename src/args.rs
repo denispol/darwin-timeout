@@ -101,6 +101,7 @@ impl Default for ArgValue<'_> {
 
 /// Time confinement mode - what clock to use for timeout measurement
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Confine {
     /// Wall clock time (includes system sleep) - default, uses mach_continuous_time
     #[default]
@@ -577,14 +578,30 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                     while j < bytes.len() {
                         match bytes[j] {
                             b'h' => {
-                                print_help();
-                                // SAFETY: exit is always safe
-                                unsafe { libc::exit(0) };
+                                /* -h must be standalone, not in a cluster */
+                                if bytes.len() == 2 {
+                                    print_help();
+                                    // SAFETY: exit is always safe
+                                    unsafe { libc::exit(0) };
+                                } else {
+                                    return Err(ParseError {
+                                        message: "-h must be used alone, not in a cluster"
+                                            .to_string(),
+                                    });
+                                }
                             }
                             b'V' => {
-                                print_version();
-                                // SAFETY: exit is always safe
-                                unsafe { libc::exit(0) };
+                                /* -V must be standalone, not in a cluster */
+                                if bytes.len() == 2 {
+                                    print_version();
+                                    // SAFETY: exit is always safe
+                                    unsafe { libc::exit(0) };
+                                } else {
+                                    return Err(ParseError {
+                                        message: "-V must be used alone, not in a cluster"
+                                            .to_string(),
+                                    });
+                                }
                             }
                             b'p' => result.preserve_status = true,
                             b'f' => result.foreground = true,

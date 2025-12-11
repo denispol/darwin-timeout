@@ -121,6 +121,138 @@ pub const fn time_to_idle_timeout(
     }
 }
 
+/* -------------------------------------------------------------------------- */
+/*                              kani proofs                                   */
+/* -------------------------------------------------------------------------- */
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /*
+     * verify elapsed_ns returns None when clock goes backwards (now < start).
+     * this catches invariant violations rather than silently clamping to 0.
+     */
+    #[kani::proof]
+    fn verify_elapsed_ns_none_on_backwards() {
+        let start: u64 = kani::any();
+        let now: u64 = kani::any();
+
+        let result = elapsed_ns(start, now);
+
+        /* if now < start, must return None (backwards clock) */
+        if now < start {
+            kani::assert(
+                result.is_none(),
+                "elapsed_ns should return None when now < start",
+            );
+        } else {
+            /* if now >= start, must return Some with correct difference */
+            kani::assert(
+                result.is_some(),
+                "elapsed_ns should return Some when now >= start",
+            );
+            kani::assert(
+                result.unwrap() == now - start,
+                "elapsed_ns should return correct difference",
+            );
+        }
+    }
+
+    /*
+     * verify remaining_ns saturates to 0 when past deadline (no negative values).
+     * unlike elapsed_ns, overshoot is expected and should clamp, not error.
+     */
+    #[kani::proof]
+    fn verify_remaining_ns_saturates_to_zero() {
+        let now: u64 = kani::any();
+        let deadline: u64 = kani::any();
+
+        let result = remaining_ns(now, deadline);
+
+        /* result must never be negative (guaranteed by u64, but verify logic) */
+        if now >= deadline {
+            kani::assert(result == 0, "remaining_ns should be 0 when past deadline");
+        } else {
+            kani::assert(
+                result == deadline - now,
+                "remaining_ns should return correct remaining time",
+            );
+        }
+    }
+
+    /*
+     * verify advance_ns saturates on overflow instead of wrapping.
+     * wrapping would create a small deadline from a large one - catastrophic.
+     */
+    #[kani::proof]
+    fn verify_advance_ns_saturates_on_overflow() {
+        let base: u64 = kani::any();
+        let offset: u64 = kani::any();
+
+        let result = advance_ns(base, offset);
+
+        /* check for overflow scenario */
+        if base.checked_add(offset).is_none() {
+            kani::assert(
+                result == u64::MAX,
+                "advance_ns should saturate to MAX on overflow",
+            );
+        } else {
+            kani::assert(
+                result == base + offset,
+                "advance_ns should return correct sum when no overflow",
+            );
+        }
+    }
+
+    /*
+     * verify adjust_ns returns None on underflow (would go negative).
+     */
+    #[kani::proof]
+    fn verify_adjust_ns_none_on_underflow() {
+        let base: u64 = kani::any();
+        let offset: i64 = kani::any();
+
+        let result = adjust_ns(base, offset);
+
+        /* check underflow: base + offset < 0 when offset is negative */
+        if offset < 0 && (offset.unsigned_abs() > base) {
+            kani::assert(
+                result.is_none(),
+                "adjust_ns should return None on underflow",
+            );
+        }
+        /* check overflow: base + offset > u64::MAX when offset is positive */
+        else if offset > 0 && base.checked_add(offset as u64).is_none() {
+            kani::assert(result.is_none(), "adjust_ns should return None on overflow");
+        } else {
+            kani::assert(
+                result.is_some(),
+                "adjust_ns should return Some for valid inputs",
+            );
+        }
+    }
+
+    /*
+     * verify deadline_reached is consistent with remaining_ns.
+     */
+    #[kani::proof]
+    fn verify_deadline_reached_consistency() {
+        let now: u64 = kani::any();
+        let deadline: u64 = kani::any();
+
+        let reached = deadline_reached(now, deadline);
+        let remaining = remaining_ns(now, deadline);
+
+        /* deadline reached iff remaining time is 0 */
+        kani::assert(
+            reached == (remaining == 0),
+            "deadline_reached should be true iff remaining_ns is 0",
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

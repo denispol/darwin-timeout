@@ -1,0 +1,134 @@
+# Verification workflow - path-based auto-triggering
+#
+# Jobs run automatically based on which files changed:
+# - kani: safety-critical files (sync, process, throttle, proc_info, time_math)
+# - fuzz: parsing files (duration, signal, args, rlimit)
+#
+# Job dependency graph (minimizes resource waste):
+#
+#   changes (ubuntu, ~5s)
+#     ├─> kani (macos, ~3min) - only if safety files changed
+#     ├─> fuzz (macos, ~5min) - only if parser files changed
+#     └─> fuzz-check (macos, ~30s) - only if fuzz DIDN'T run
+#
+# Miri runs in ci.yml (always, on macOS for darwin-specific tests)
+# See CONTRIBUTING.md "CI Auto-Verification Rules" for the full mapping.
+
+name: Verification
+
+on:
+  pull_request:
+    paths:
+      - "src/**/*.rs"
+      - "fuzz/**/*.rs"
+      - "Cargo.toml"
+      - ".github/workflows/verify.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**/*.rs"
+      - "fuzz/**/*.rs"
+      - "Cargo.toml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Principle of least privilege - only read access needed
+permissions:
+  contents: read
+
+jobs:
+  # Detect which files changed to determine which jobs to run
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      kani: ${{ steps.filter.outputs.kani }}
+      fuzz: ${{ steps.filter.outputs.fuzz }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            kani:
+              - 'src/sync.rs'
+              - 'src/process.rs'
+              - 'src/throttle.rs'
+              - 'src/proc_info.rs'
+              - 'src/time_math.rs'
+            fuzz:
+              - 'src/duration.rs'
+              - 'src/signal.rs'
+              - 'src/args.rs'
+              - 'src/rlimit.rs'
+              - 'fuzz/**/*.rs'
+
+  # Kani: formal verification for safety-critical modules
+  # Auto-triggered when: sync.rs, process.rs, throttle.rs, proc_info.rs, time_math.rs
+  # Runs on macOS since code uses darwin-specific APIs (kqueue, mach_continuous_time)
+  kani:
+    name: Kani Proofs (19)
+    needs: changes
+    if: ${{ needs.changes.outputs.kani == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+
+      - name: Run Kani proofs
+        run: cargo kani
+
+  # Fuzz: coverage-guided fuzzing for parsing modules
+  # Auto-triggered when: duration.rs, signal.rs, args.rs, rlimit.rs, fuzz/**
+  fuzz:
+    name: Fuzz Targets (4×60s)
+    needs: changes
+    if: ${{ needs.changes.outputs.fuzz == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Fuzz parse_duration
+        run: cargo +nightly fuzz run parse_duration -- -max_total_time=60
+
+      - name: Fuzz parse_signal
+        run: cargo +nightly fuzz run parse_signal -- -max_total_time=60
+
+      - name: Fuzz parse_args
+        run: cargo +nightly fuzz run parse_args -- -max_total_time=60
+
+      - name: Fuzz parse_mem_limit
+        run: cargo +nightly fuzz run parse_mem_limit -- -max_total_time=60
+
+  # Fuzz compile check: verify fuzz targets compile when fuzz job doesn't run.
+  # Skipped when fuzz runs (redundant - fuzz already compiles targets).
+  fuzz-check:
+    name: Fuzz Targets Compile
+    needs: changes
+    if: ${{ needs.changes.outputs.fuzz != 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Check fuzz targets compile
+        run: cd fuzz && cargo fuzz check

@@ -420,8 +420,15 @@ impl Attempts {
     }
 }
 
-/* what happened when we ran the command (possibly with retries) */
+/// Result of running a command with timeout.
+///
+/// This enum represents all possible outcomes when running a command:
+/// - `Completed`: command finished before timeout
+/// - `TimedOut`: command exceeded time limit
+/// - `MemoryLimitExceeded`: command exceeded memory limit
+/// - `SignalForwarded`: parent received a signal and forwarded it
 #[cfg_attr(test, derive(Debug))]
+#[non_exhaustive]
 pub enum RunResult {
     Completed {
         status: RawExitStatus,
@@ -465,6 +472,7 @@ struct MemoryLimitConfig {
 /// Reason for timeout (wall clock vs stdin idle)
 #[cfg_attr(test, derive(Debug))]
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum TimeoutReason {
     #[default]
     WallClock,
@@ -552,26 +560,91 @@ fn status_to_exit_code(status: &RawExitStatus) -> u8 {
     (status.code().unwrap_or(1) & 0xFF) as u8
 }
 
-/* runtime config built from CLI args */
+/// Configuration for running a command with timeout.
+///
+/// Construct via struct literal or use [`RunConfig::default()`] as a base.
+/// All durations use wall-clock time by default (survives system sleep).
+///
+/// # Example
+///
+/// ```ignore
+/// use darwin_timeout::{RunConfig, Signal};
+/// use std::time::Duration;
+///
+/// let config = RunConfig {
+///     timeout: Duration::from_secs(30),
+///     signal: Signal::SIGTERM,
+///     ..RunConfig::default()
+/// };
+/// ```
+///
+/// # Stability Note
+///
+/// New fields may be added in minor versions. Use `..RunConfig::default()`
+/// to ensure forward compatibility.
 pub struct RunConfig {
-    pub timeout: Duration,               /* how long before we send the signal */
-    pub signal: Signal,                  /* what to send (default: SIGTERM) */
-    pub kill_after: Option<Duration>,    /* if set, SIGKILL after this grace period */
-    pub foreground: bool,                /* don't create process group */
-    pub verbose: bool,                   /* print signal diagnostics */
-    pub quiet: bool,                     /* suppress our stderr */
-    pub timeout_exit_code: u8,           /* exit code on timeout (default: 124) */
-    pub on_timeout: Option<String>,      /* hook to run before killing (%p = PID) */
-    pub on_timeout_limit: Duration,      /* how long hook gets to run */
-    pub confine: Confine,                /* wall (includes sleep) or active (excludes sleep) */
-    pub retry_count: u32,                /* number of retries on timeout (0 = no retry) */
-    pub retry_delay: Duration,           /* delay between retries */
-    pub retry_backoff: u32,              /* multiplier for delay each retry (1 = no backoff) */
-    pub heartbeat: Option<Duration>,     /* print status to stderr at this interval */
-    pub stdin_timeout: Option<Duration>, /* timeout if stdin has no activity */
-    pub stdin_passthrough: bool,         /* non-consuming stdin idle detection */
-    pub limits: ResourceLimits,          /* RLIMIT_AS / RLIMIT_CPU */
-    pub cpu_throttle: Option<CpuThrottleConfig>, /* CPU percent throttling */
+    /// Maximum time before sending the timeout signal.
+    pub timeout: Duration,
+    /// Signal to send on timeout (default: SIGTERM).
+    pub signal: Signal,
+    /// Grace period before escalating to SIGKILL. `None` = no escalation.
+    pub kill_after: Option<Duration>,
+    /// If `true`, don't create a process group (child inherits parent's group).
+    pub foreground: bool,
+    /// Print signal diagnostics to stderr.
+    pub verbose: bool,
+    /// Suppress timeout's own error messages.
+    pub quiet: bool,
+    /// Exit code when command times out (default: 124).
+    pub timeout_exit_code: u8,
+    /// Shell command to run before killing on timeout. `%p` is replaced with child PID.
+    pub on_timeout: Option<String>,
+    /// Time limit for the `on_timeout` hook (default: 5s).
+    pub on_timeout_limit: Duration,
+    /// Time mode: `Wall` (includes sleep) or `Active` (excludes sleep).
+    pub confine: Confine,
+    /// Number of retries on timeout (0 = no retry).
+    pub retry_count: u32,
+    /// Delay between retries.
+    pub retry_delay: Duration,
+    /// Multiplier for delay each retry (1 = no backoff, 2 = exponential).
+    pub retry_backoff: u32,
+    /// Print heartbeat status to stderr at this interval.
+    pub heartbeat: Option<Duration>,
+    /// Timeout if stdin has no activity for this duration.
+    pub stdin_timeout: Option<Duration>,
+    /// If `true`, detect stdin idle without consuming data (use with `stdin_timeout`).
+    pub stdin_passthrough: bool,
+    /// Resource limits (memory, CPU time).
+    pub limits: ResourceLimits,
+    /// CPU throttling configuration.
+    pub cpu_throttle: Option<CpuThrottleConfig>,
+}
+
+impl Default for RunConfig {
+    /// Returns a default configuration with 30-second timeout and SIGTERM.
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+            signal: Signal::SIGTERM,
+            kill_after: None,
+            foreground: false,
+            verbose: false,
+            quiet: false,
+            timeout_exit_code: crate::error::exit_codes::TIMEOUT,
+            on_timeout: None,
+            on_timeout_limit: Duration::from_secs(5),
+            confine: Confine::Wall,
+            retry_count: 0,
+            retry_delay: Duration::ZERO,
+            retry_backoff: 1,
+            heartbeat: None,
+            stdin_timeout: None,
+            stdin_passthrough: false,
+            limits: ResourceLimits::default(),
+            cpu_throttle: None,
+        }
+    }
 }
 
 impl RunConfig {

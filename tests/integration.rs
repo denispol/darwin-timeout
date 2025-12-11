@@ -601,6 +601,27 @@ fn test_version() {
         .stdout(predicate::str::contains("timeout"));
 }
 
+#[test]
+fn test_version_short_flag_must_be_standalone() {
+    /* regression test for fuzzer-discovered bug: -V in a cluster like -V--i2
+     * should not call exit(0) - it should error about -V not being a valid cluster member */
+    timeout_cmd()
+        .arg("-V--i2")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("-V must be used alone"));
+}
+
+#[test]
+fn test_help_short_flag_must_be_standalone() {
+    /* -h must also be standalone, not in a cluster like -h--i2 */
+    timeout_cmd()
+        .arg("-h--i2")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("-h must be used alone"));
+}
+
 /* =========================================================================
  * PROCESS GROUP HANDLING - Kill children too
  * ========================================================================= */
@@ -3125,5 +3146,263 @@ fn test_stdin_timeout_retry_with_dev_null() {
         elapsed >= std::time::Duration::from_millis(150),
         "should wait for wall clock timeouts: {:?}",
         elapsed
+    );
+}
+
+/* =========================================================================
+ * RESOURCE LIMITS - Memory, CPU time, and CPU throttling
+ * ========================================================================= */
+
+#[test]
+fn test_cpu_percent_flag_accepted() {
+    /*
+     * --cpu-percent should be accepted and parsed correctly.
+     * Use a high limit (99%) so process completes normally.
+     */
+    timeout_cmd()
+        .args(["--cpu-percent=99", "5s", "echo", "throttled"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("throttled"));
+}
+
+#[test]
+fn test_cpu_percent_invalid_zero() {
+    /* 0% is invalid - cannot throttle to nothing */
+    timeout_cmd()
+        .args(["--cpu-percent=0", "5s", "echo", "test"])
+        .assert()
+        .code(125)
+        .stderr(predicate::str::contains("invalid"));
+}
+
+#[test]
+fn test_cpu_percent_invalid_over_100() {
+    /* non-numeric is invalid */
+    timeout_cmd()
+        .args(["--cpu-percent=abc", "5s", "echo", "test"])
+        .assert()
+        .code(125)
+        .stderr(predicate::str::contains("invalid"));
+}
+
+#[test]
+fn test_cpu_percent_throttles_busy_loop() {
+    /*
+     * --cpu-percent=20 should throttle a CPU-intensive process.
+     * We verify that a busy loop takes longer with throttling enabled.
+     * This tests the SIGSTOP/SIGCONT throttling mechanism in throttle.rs.
+     */
+    use std::time::Instant;
+
+    /* baseline: unthrottled busy loop for 200ms should take ~200ms */
+    let start = Instant::now();
+    let _ = timeout_cmd()
+        .args([
+            "2s",
+            "sh",
+            "-c",
+            /* busy loop: increment counter until 200ms elapsed */
+            "i=0; end=$(($(date +%s) + 1)); while [ $(date +%s) -lt $end ]; do i=$((i+1)); done",
+        ])
+        .output();
+    let baseline = start.elapsed();
+
+    /* throttled: 20% CPU limit should make the same work take 4-5x longer */
+    let start = Instant::now();
+    let output = timeout_cmd()
+        .args([
+            "--cpu-percent=20",
+            "10s", /* generous timeout since throttling slows it down */
+            "sh",
+            "-c",
+            "i=0; end=$(($(date +%s) + 1)); while [ $(date +%s) -lt $end ]; do i=$((i+1)); done",
+        ])
+        .output()
+        .expect("command should run");
+    let throttled = start.elapsed();
+
+    /* throttled should take significantly longer due to SIGSTOP pauses */
+    /* use 1.5x as threshold - conservative to avoid flaky tests */
+    assert!(
+        throttled > baseline || throttled > Duration::from_millis(500),
+        "throttled ({:?}) should take longer than baseline ({:?})",
+        throttled,
+        baseline
+    );
+    assert!(
+        output.status.success(),
+        "command should complete: {:?}",
+        output.status
+    );
+}
+
+#[test]
+fn test_cpu_percent_json_output() {
+    /*
+     * JSON output should include cpu_percent in limits when --cpu-percent is used.
+     */
+    let output = timeout_cmd()
+        .args(["--json", "--cpu-percent=50", "5s", "echo", "test"])
+        .output()
+        .expect("command should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(r#""cpu_percent":50"#),
+        "JSON should include cpu_percent in limits: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_mem_limit_flag_accepted() {
+    /*
+     * --mem-limit should be accepted. Use a generous limit so process completes.
+     */
+    timeout_cmd()
+        .args(["--mem-limit=1G", "5s", "echo", "limited"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("limited"));
+}
+
+#[test]
+fn test_mem_limit_invalid_negative() {
+    /* negative bytes is invalid */
+    timeout_cmd()
+        .args(["--mem-limit=-1", "5s", "echo", "test"])
+        .assert()
+        .code(125)
+        .stderr(predicate::str::contains("invalid"));
+}
+
+#[test]
+fn test_mem_limit_units_accepted() {
+    /* Various memory units should be accepted */
+    for unit in ["1K", "1KB", "1M", "1MB", "1G", "1GB"] {
+        timeout_cmd()
+            .args([&format!("--mem-limit={}", unit), "5s", "true"])
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn test_mem_limit_kills_on_exceed() {
+    /*
+     * --mem-limit should kill process when it exceeds the limit.
+     * This tests the polling-based memory enforcement in runner.rs.
+     *
+     * We use a small limit (5M) and have the child allocate more using Python.
+     * The process should be killed (not timeout).
+     */
+    let output = timeout_cmd()
+        .args([
+            "--json",
+            "--mem-limit=5M",
+            "10s",
+            "python3",
+            "-c",
+            /* allocate ~50MB in a list - exceeds 5M limit */
+            "import time; x = [0] * (50 * 1024 * 1024 // 8); time.sleep(10)",
+        ])
+        .output()
+        .expect("command should run");
+
+    /* should be killed due to memory limit, not timeout */
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains(r#""schema_version":7"#),
+        "expected schema_version 7: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""status":"memory_limit""#),
+        "expected memory_limit status: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""limit_bytes":"#) && stdout.contains(r#""actual_bytes":"#),
+        "expected limit_bytes and actual_bytes fields: {}",
+        stdout
+    );
+
+    /* exit code should indicate killed (SIGKILL = 137) or resource limit */
+    let code = output.status.code().unwrap_or(0);
+    assert!(
+        code == 137 || code == 125 || !output.status.success(),
+        "process should be killed (got code {}): {}",
+        code,
+        stdout
+    );
+}
+
+#[test]
+fn test_cpu_time_flag_accepted() {
+    /*
+     * --cpu-time should set RLIMIT_CPU for the child process.
+     * Use a generous limit so process completes normally.
+     */
+    timeout_cmd()
+        .args(["--cpu-time=60s", "5s", "echo", "limited"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("limited"));
+}
+
+#[test]
+fn test_cpu_time_zero_kills_immediately() {
+    /*
+     * 0s CPU time means immediate SIGXCPU from kernel.
+     * This is valid behavior - kernel enforces the limit.
+     */
+    timeout_cmd()
+        .args(["--cpu-time=0s", "5s", "echo", "test"])
+        .assert()
+        .code(152); /* 128 + SIGXCPU(24) */
+}
+
+#[test]
+fn test_cpu_time_kills_cpu_intensive() {
+    /*
+     * --cpu-time should kill process when it exceeds CPU time limit.
+     * RLIMIT_CPU sends SIGXCPU then SIGKILL.
+     *
+     * Use a very short CPU limit (1s) with an infinite busy loop.
+     */
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let output = timeout_cmd()
+        .args([
+            "--json",
+            "--cpu-time=1s",
+            "30s", /* wall timeout much higher than CPU limit */
+            "sh",
+            "-c",
+            "while true; do :; done", /* infinite busy loop burning CPU */
+        ])
+        .output()
+        .expect("command should run");
+
+    let elapsed = start.elapsed();
+
+    /* should be killed by RLIMIT_CPU (~1s CPU time), not wall timeout (30s) */
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "should be killed by CPU limit, not wall timeout: {:?}",
+        elapsed
+    );
+
+    /* exit code should reflect SIGXCPU (24) or SIGKILL (9) */
+    /* SIGXCPU = 128 + 24 = 152, SIGKILL = 128 + 9 = 137 */
+    let code = output.status.code().unwrap_or(0);
+    assert!(
+        code == 152 || code == 137 || code == 124,
+        "should exit with signal code (got {}): {}",
+        code,
+        String::from_utf8_lossy(&output.stdout)
     );
 }

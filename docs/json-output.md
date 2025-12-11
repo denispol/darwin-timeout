@@ -12,10 +12,10 @@ Output is a single JSON object on stdout. The command's own stdout/stderr pass t
 
 ## Schema Version
 
-All JSON output includes a `schema_version` field. The current version is **5**.
+All JSON output includes a `schema_version` field. The current version is **7**.
 
 ```json
-{"schema_version":5,"status":"completed",...}
+{"schema_version":7,"status":"completed",...}
 ```
 
 Schema changes:
@@ -25,6 +25,8 @@ Schema changes:
 - **v3**: Added resource usage fields (`user_time_ms`, `system_time_ms`, `max_rss_kb`)
 - **v4**: Added retry fields (`attempts`, `attempt_results`)
 - **v5**: Added `timeout_reason` field to distinguish timeout types (`wall_clock` vs `stdin_idle`)
+- **v6**: Added `limits` object describing configured resource limits
+- **v7**: Added `memory_limit` status (`limit_bytes`, `actual_bytes`)
 
 ## Status Types
 
@@ -34,6 +36,7 @@ The `status` field indicates what happened:
 |--------|---------|
 | `completed` | Command finished before timeout |
 | `timeout` | Command was killed due to timeout |
+| `memory_limit` | Command exceeded `--mem-limit` |
 | `signal_forwarded` | timeout received a signal (SIGTERM/SIGINT/SIGHUP) and forwarded it to the child |
 | `error` | timeout itself failed (command not found, permission denied, etc.) |
 
@@ -45,7 +48,7 @@ Command finished normally before the timeout.
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 7,
   "status": "completed",
   "exit_code": 0,
   "elapsed_ms": 1523,
@@ -57,7 +60,7 @@ Command finished normally before the timeout.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 5) |
+| `schema_version` | integer | Schema version (currently 7) |
 | `status` | string | Always `"completed"` |
 | `exit_code` | integer | Command's exit code (0-255) |
 | `elapsed_ms` | integer | Wall-clock time in milliseconds |
@@ -71,7 +74,7 @@ Command was killed because it exceeded the time limit.
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 7,
   "status": "timeout",
   "timeout_reason": "wall_clock",
   "signal": "SIGTERM",
@@ -88,7 +91,7 @@ Command was killed because it exceeded the time limit.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 5) |
+| `schema_version` | integer | Schema version (currently 7) |
 | `status` | string | Always `"timeout"` |
 | `timeout_reason` | string | Why timeout occurred: `"wall_clock"` (main timeout) or `"stdin_idle"` (stdin timeout via `-S`) |
 | `signal` | string | Signal sent to command (e.g., `"SIGTERM"`, `"SIGKILL"`) |
@@ -107,7 +110,7 @@ When using `-S/--stdin-timeout`, a timeout can occur due to stdin inactivity:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 7,
   "status": "timeout",
   "timeout_reason": "stdin_idle",
   "signal": "SIGTERM",
@@ -139,7 +142,7 @@ When `--on-timeout` is specified, additional fields describe the hook execution:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 7,
   "status": "timeout",
   "timeout_reason": "wall_clock",
   "signal": "SIGTERM",
@@ -171,7 +174,7 @@ When `--retry N` is specified (N > 0), additional fields track retry attempts:
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 7,
   "status": "completed",
   "exit_code": 0,
   "elapsed_ms": 45000,
@@ -208,7 +211,7 @@ timeout received a signal (e.g., from `docker stop`, `kill`, or Ctrl+C) and forw
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 7,
   "status": "signal_forwarded",
   "signal": "SIGTERM",
   "signal_num": 15,
@@ -223,7 +226,7 @@ timeout received a signal (e.g., from `docker stop`, `kill`, or Ctrl+C) and forw
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 5) |
+| `schema_version` | integer | Schema version (currently 7) |
 | `status` | string | Always `"signal_forwarded"` |
 | `signal` | string | Signal that was forwarded |
 | `signal_num` | integer | Signal number |
@@ -234,13 +237,35 @@ timeout received a signal (e.g., from `docker stop`, `kill`, or Ctrl+C) and forw
 | `system_time_ms` | integer | System (kernel) CPU time in milliseconds |
 | `max_rss_kb` | integer | Peak memory usage in kilobytes |
 
+### memory_limit
+
+Command was killed because it exceeded `--mem-limit`.
+
+```json
+{
+  "schema_version": 7,
+  "status": "memory_limit",
+  "signal": "SIGKILL",
+  "signal_num": 9,
+  "killed": true,
+  "command_exit_code": -1,
+  "exit_code": 137,
+  "elapsed_ms": 1200,
+  "limit_bytes": 5242880,
+  "actual_bytes": 8388608,
+  "user_time_ms": 50,
+  "system_time_ms": 10,
+  "max_rss_kb": 4096
+}
+```
+
 ### error
 
 timeout itself encountered an error.
 
 ```json
 {
-  "schema_version": 5,
+  "schema_version": 7,
   "status": "error",
   "error": "command not found: nonexistent_cmd",
   "exit_code": 127,
@@ -250,7 +275,7 @@ timeout itself encountered an error.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 5) |
+| `schema_version` | integer | Schema version (currently 7) |
 | `status` | string | Always `"error"` |
 | `error` | string | Human-readable error message |
 | `exit_code` | integer | Exit code (125=internal error, 126=not executable, 127=not found) |

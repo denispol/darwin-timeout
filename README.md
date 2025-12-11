@@ -1,9 +1,13 @@
 darwin-timeout
 ==============
 
-GNU `timeout` for macOS, done right. Works through sleep. 100KB. Zero dependencies.
+GNU `timeout` for macOS, done right. Works through sleep. ~100KB. Zero dependencies.
 
-    brew install denispol/tap/darwin-timeout
+**CLI tool** — drop-in replacement for GNU timeout.  
+**Rust library** — embed timeout logic in your own tools.
+
+    brew install denispol/tap/darwin-timeout        # CLI
+    cargo add darwin-timeout                        # library
 
 Works exactly like GNU timeout:
 
@@ -40,21 +44,19 @@ darwin-timeout uses `mach_continuous_time`, the only macOS clock that keeps tick
 
 **Scenario:** `timeout 1h ./build` with laptop sleeping 45min in the middle
 
-```
-                0        15min                 1h                    1h 45min
-                ├──────────┬──────────────────────────────┬──────────────────────────────┤
-   Real time    │▓▓▓▓▓▓▓▓▓▓│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│
-                │  awake   │            sleep             │            awake             │
-                └──────────┴──────────────────────────────┴──────────────────────────────┘
+    0        15min                 1h                    1h 45min
+    ├──────────┬──────────────────────────────┬──────────────────────────────┤
+    Real time  │▓▓▓▓▓▓▓▓▓▓│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│
+              │  awake   │            sleep             │            awake             │
+              └──────────┴──────────────────────────────┴──────────────────────────────┘
 
-darwin-timeout  |██████████|██████████████████████████████^ fires at 1h ✓
-                           (counts sleep time)
+    darwin-timeout  |██████████|██████████████████████████████^ fires at 1h ✓
+                               (counts sleep time)
 
-GNU timeout     |██████████|······························|██████████████████████████████^ fires at 1h 45min ✗
-                           (pauses during sleep)
+    GNU timeout     |██████████|······························|██████████████████████████████^ fires at 1h 45min ✗
+                               (pauses during sleep)
 
-Legend: ▓ awake  ░ sleep  █ counting  · paused  ^ fire point
-```
+    Legend: ▓ awake  ░ sleep  █ counting  · paused  ^ fire point
 
 |                           | darwin-timeout | GNU coreutils |
 |---------------------------|----------------|---------------|
@@ -69,13 +71,36 @@ Legend: ▓ awake  ░ sleep  █ counting  · paused  ^ fire point
 | Wait-for-file             | ✓              | ✗             |
 | Custom exit codes         | ✓              | ✗             |
 | Env var configuration     | ✓              | ✗             |
-| Binary size               | 100KB          | 15.7MB        |
+| Binary size               | ~100KB          | 15.7MB        |
 | Startup time              | 3.6ms          | 4.2ms         |
 | Zero CPU while waiting    | ✓ (kqueue)     | ✓ (nanosleep) |
 
 *Performance data from [250 benchmark runs](#benchmarks) on Apple M4 Pro.*
 
 100% GNU-compatible. All flags work identically (`-s`, `-k`, `-p`, `-f`, `-v`). Drop-in replacement for Apple Silicon and Intel Macs.
+
+Quality & Testing
+-----------------
+
+darwin-timeout uses a **five-layer verification approach**:
+
+| Method | Coverage | What It Catches |
+|--------|----------|-----------------|
+| **Unit tests** | 154 tests | Logic errors, edge cases |
+| **Integration tests** | 179 tests | Real process behavior, signals, I/O |
+| **Library API tests** | 10 tests | Public API usability, lifecycle |
+| **Property-based (proptest)** | 30 properties, ~7500 cases | Input invariants, mathematical relationships |
+| **Fuzzing (cargo-fuzz)** | 4 targets, ~70M executions | Crashes, panics, hangs from malformed input |
+| **Formal verification (kani)** | 19 proofs | Mathematical proof of memory safety, no overflows |
+
+**What this means for you:**
+
+- Parsing code is fuzz-tested (found and fixed bugs before release)
+- Unsafe code has formal proofs (mathematically verified, not just tested)
+- State machines are proven correct (no race conditions in signal handling)
+- Arithmetic is overflow-checked (all time calculations verified)
+
+See [docs/VERIFICATION.md](docs/VERIFICATION.md) for methodology details.
 
 Install
 -------
@@ -86,10 +111,14 @@ Install
 
 **Binary download:** Grab the universal binary (arm64 + x86_64) from [releases](https://github.com/denispol/darwin-timeout/releases).
 
-**From source:**
+**From source (CLI):**
 
     cargo build --release
     sudo cp target/release/timeout /usr/local/bin/
+
+**As a Rust library:**
+
+    cargo add darwin-timeout
 
 Shell completions are installed automatically with Homebrew. For manual install, see [completions/](completions/).
 
@@ -169,7 +198,7 @@ Use Cases
     # Full resource box: time + memory + CPU limits together
     timeout --mem-limit 512M --cpu-percent 25 --cpu-time 5m 30m ./untrusted-script
 
-> **Why this matters:** macOS has no cgroups. `ulimit` memory limits don't work. Until now, there was no way to enforce resource limits on a single command without containers or third-party daemons. darwin-timeout brings Linux-style resource control to macOS, in 100KB.
+> **Why this matters:** macOS has no cgroups. `ulimit` memory limits don't work. Until now, there was no way to enforce resource limits on a single command without containers or third-party daemons. darwin-timeout brings Linux-style resource control to macOS, in ~100KB.
 
 Options
 -------
@@ -267,12 +296,12 @@ JSON Output
 Machine-readable output for CI/CD pipelines and automation:
 
     $ timeout --json 1s sleep 0.5
-    {"schema_version":5,"status":"completed","exit_code":0,"elapsed_ms":504,"user_time_ms":1,"system_time_ms":2,"max_rss_kb":1248}
+    {"schema_version":7,"status":"completed","exit_code":0,"elapsed_ms":504,"user_time_ms":1,"system_time_ms":2,"max_rss_kb":1248}
 
     $ timeout --json 0.5s sleep 10
-    {"schema_version":5,"status":"timeout","timeout_reason":"wall_clock","signal":"SIGTERM","signal_num":15,"killed":false,"command_exit_code":-1,"exit_code":124,"elapsed_ms":502,"user_time_ms":0,"system_time_ms":1,"max_rss_kb":1232}
+    {"schema_version":7,"status":"timeout","timeout_reason":"wall_clock","signal":"SIGTERM","signal_num":15,"killed":false,"command_exit_code":-1,"exit_code":124,"elapsed_ms":502,"user_time_ms":0,"system_time_ms":1,"max_rss_kb":1232}
 
-**Status types:** `completed`, `timeout`, `signal_forwarded`, `error`
+**Status types:** `completed`, `timeout`, `memory_limit`, `signal_forwarded`, `error`
 
 **Timeout reasons:** `wall_clock` (main timeout), `stdin_idle` (-S/--stdin-timeout)
 
@@ -316,7 +345,7 @@ Built on Darwin kernel primitives:
 - **Signal forwarding**: SIGTERM/SIGINT/SIGHUP/SIGQUIT/SIGUSR1/SIGUSR2 forwarded to child process group
 - **Process groups**: child runs in own group so signals reach all descendants
 
-100KB `no_std` binary. Custom allocator, direct syscalls, no libstd runtime.
+~100KB `no_std` binary. Custom allocator, direct syscalls, no libstd runtime.
 
 Benchmarks
 ----------
@@ -325,7 +354,7 @@ All benchmarks on Apple M4 Pro, macOS Tahoe 26.2, hyperfine 1.20.0.
 See [docs/benchmarks/](docs/benchmarks/) for raw data and methodology.
 
     # Binary size
-    darwin-timeout: 100KB
+    darwin-timeout: ~100KB
     GNU coreutils:  15.7MB (157x larger)
 
     # Startup overhead (250 runs across 5 sessions)
@@ -349,10 +378,52 @@ Development
 -----------
 
     cargo test                  # run tests
+    cargo test --test proptest  # property-based tests
     cargo clippy                # lint
-    ./scripts/benchmark.sh      # run benchmarks
+    ./scripts/verify-all.sh     # full verification suite
 
-Library usage coming soon; core timeout logic will be available as a crate.
+**Contributing:** See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, verification requirements, and the testing pyramid.
+
+**Verification:** This project uses five verification methods: unit tests, integration tests, proptest, cargo-fuzz, and kani formal proofs. See [docs/VERIFICATION.md](docs/VERIFICATION.md) for details.
+
+Library Usage
+-------------
+
+The `darwin_timeout` crate exposes the core timeout functionality for embedding in your own tools:
+
+```rust
+use darwin_timeout::{RunConfig, RunResult, Signal, run_command, setup_signal_forwarding};
+use std::time::Duration;
+
+let _ = setup_signal_forwarding();
+
+let config = RunConfig {
+    timeout: Duration::from_secs(30),
+    signal: Signal::SIGTERM,
+    kill_after: Some(Duration::from_secs(5)),
+    ..RunConfig::default()
+};
+
+let args = ["-c".to_string(), "sleep 10".to_string()];
+match run_command("sh", &args, &config) {
+    Ok(RunResult::Completed { status, rusage }) => {
+        println!("Completed with exit code {:?}", status.code());
+    }
+    Ok(RunResult::TimedOut { signal, .. }) => {
+        println!("Timed out, sent {:?}", signal);
+    }
+    Ok(_) => println!("Other outcome"),
+    Err(e) => eprintln!("Error: {}", e),
+}
+```
+
+**Platform:** macOS only (uses Darwin kernel APIs).
+
+**API Docs:** [docs.rs/darwin-timeout](https://docs.rs/darwin-timeout)
+
+**Performance:** Library calls have the same performance as CLI invocations—both use identical code paths. No additional overhead.
+
+> ⚠️ **Stability:** The library API is experimental. Use `..RunConfig::default()` when constructing configs and include wildcard arms in `RunResult` matches to ensure forward compatibility with new fields and variants.
 
 License
 -------
