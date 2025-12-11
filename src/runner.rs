@@ -948,6 +948,10 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
 
     match exit_result {
         WaitResult::Exited(status, rusage) => {
+            /* process already reaped - mark as exited to prevent PID recycling issues */
+            if let Some(ref mut ctx) = throttle_ctx {
+                ctx.state.mark_process_exited();
+            }
             return Ok(RunResult::Completed { status, rusage });
         }
         WaitResult::ReceivedSignal(sig) => {
@@ -965,6 +969,10 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
                 Ok((s, r)) => (Some(s), Some(r)),
                 Err(_) => (None, None), /* child already reaped or wait failed */
             };
+            /* mark process exited to prevent PID recycling issues in Drop */
+            if let Some(ref mut ctx) = throttle_ctx {
+                ctx.state.mark_process_exited();
+            }
             return Ok(RunResult::SignalForwarded {
                 signal: sig,
                 status,
@@ -1008,6 +1016,10 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
 
                 match grace_result {
                     WaitResult::Exited(status, rusage) => {
+                        /* mark process exited to prevent PID recycling issues */
+                        if let Some(ref mut ctx) = throttle_ctx {
+                            ctx.state.mark_process_exited();
+                        }
                         return Ok(RunResult::MemoryLimitExceeded {
                             signal: config.signal,
                             killed: false,
@@ -1028,6 +1040,10 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
                             SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
                             _ => TimeoutError::Internal("wait failed".to_string()),
                         })?;
+                        /* mark process exited to prevent PID recycling issues */
+                        if let Some(ref mut ctx) = throttle_ctx {
+                            ctx.state.mark_process_exited();
+                        }
                         return Ok(RunResult::MemoryLimitExceeded {
                             signal: config.signal,
                             killed: true,
@@ -1044,6 +1060,10 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
                     SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
                     _ => TimeoutError::Internal("wait failed".to_string()),
                 })?;
+                /* mark process exited to prevent PID recycling issues */
+                if let Some(ref mut ctx) = throttle_ctx {
+                    ctx.state.mark_process_exited();
+                }
                 return Ok(RunResult::MemoryLimitExceeded {
                     signal: config.signal,
                     killed: false,
@@ -1106,6 +1126,10 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
 
         match grace_result {
             WaitResult::Exited(status, rusage) => {
+                /* mark process exited to prevent PID recycling issues */
+                if let Some(ref mut ctx) = throttle_ctx {
+                    ctx.state.mark_process_exited();
+                }
                 return Ok(RunResult::TimedOut {
                     signal: config.signal,
                     killed: false,
@@ -1130,6 +1154,10 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
                     Ok((s, r)) => (Some(s), Some(r)),
                     Err(_) => (None, None), /* child already reaped or wait failed */
                 };
+                /* mark process exited to prevent PID recycling issues */
+                if let Some(ref mut ctx) = throttle_ctx {
+                    ctx.state.mark_process_exited();
+                }
                 return Ok(RunResult::SignalForwarded {
                     signal: sig,
                     status,
@@ -1158,6 +1186,11 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
             _ => TimeoutError::Internal("wait failed".to_string()),
         })?;
 
+        /* mark process exited to prevent PID recycling issues */
+        if let Some(ref mut ctx) = throttle_ctx {
+            ctx.state.mark_process_exited();
+        }
+
         Ok(RunResult::TimedOut {
             signal: config.signal,
             killed: true,
@@ -1172,6 +1205,11 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
             SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
             _ => TimeoutError::Internal("wait failed".to_string()),
         })?;
+
+        /* mark process exited to prevent PID recycling issues */
+        if let Some(ref mut ctx) = throttle_ctx {
+            ctx.state.mark_process_exited();
+        }
 
         Ok(RunResult::TimedOut {
             signal: config.signal,

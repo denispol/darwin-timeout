@@ -40,6 +40,7 @@ pub struct CpuThrottleState {
     pub last_cpu_ns: u64,  /* most recent CPU time reading */
     pub last_wall_ns: u64, /* most recent wall time reading */
     suspended: bool,       /* track if we've sent SIGSTOP */
+    process_exited: bool,  /* set when process is known dead - prevents PID recycling issues */
 }
 
 impl CpuThrottleState {
@@ -59,6 +60,7 @@ impl CpuThrottleState {
             last_cpu_ns: initial_cpu_ns,
             last_wall_ns: now_ns,
             suspended: false,
+            process_exited: false,
         })
     }
 
@@ -66,7 +68,7 @@ impl CpuThrottleState {
      * sending SIGTERM to a SIGSTOP'd process creates deadlock if child
      * intercepts the signal (can't run handler while stopped). */
     pub fn resume(&mut self) {
-        if self.suspended {
+        if self.suspended && !self.process_exited {
             // SAFETY: kill with SIGCONT is safe, ESRCH (process gone) is fine
             if unsafe { libc::kill(self.pid, libc::SIGCONT) } == 0 {
                 self.suspended = false;
@@ -75,6 +77,13 @@ impl CpuThrottleState {
                 self.suspended = false;
             }
         }
+    }
+
+    /* mark process as exited - prevents PID recycling issues where Drop
+     * could SIGCONT an unrelated process that got the recycled PID. */
+    pub fn mark_process_exited(&mut self) {
+        self.process_exited = true;
+        self.suspended = false; /* dead process can't be suspended */
     }
 
     /* check cpu usage and throttle if needed. returns whether process is currently suspended.
@@ -91,9 +100,11 @@ impl CpuThrottleState {
         let current_cpu_ns = match proc_info::get_process_cpu_time(self.pid) {
             Some(t) => t,
             None => {
-                /* process gone - just return current state */
+                /* process gone - mark as exited and not suspended */
+                self.process_exited = true;
+                self.suspended = false;
                 self.last_wall_ns = now_ns;
-                return Ok(self.suspended);
+                return Ok(false);
             }
         };
 
