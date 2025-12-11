@@ -13,7 +13,7 @@
 #
 # Usage:
 #   ./scripts/build-universal.sh          # stable build (~730KB universal)
-#   ./scripts/build-universal.sh --minimal # nightly build-std (~100KB universal)
+#   ./scripts/build-universal.sh --minimal # nightly build-std (~~100KB universal)
 #
 # Output:
 #   target/universal/timeout - The universal binary

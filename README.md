@@ -1,7 +1,7 @@
 darwin-timeout
 ==============
 
-GNU `timeout` for macOS, done right. Works through sleep. 100KB. Zero dependencies.
+GNU `timeout` for macOS, done right. Works through sleep. ~100KB. Zero dependencies.
 
     brew install denispol/tap/darwin-timeout
 
@@ -69,7 +69,7 @@ Legend: ▓ awake  ░ sleep  █ counting  · paused  ^ fire point
 | Wait-for-file             | ✓              | ✗             |
 | Custom exit codes         | ✓              | ✗             |
 | Env var configuration     | ✓              | ✗             |
-| Binary size               | 100KB          | 15.7MB        |
+| Binary size               | ~100KB          | 15.7MB        |
 | Startup time              | 3.6ms          | 4.2ms         |
 | Zero CPU while waiting    | ✓ (kqueue)     | ✓ (nanosleep) |
 
@@ -169,7 +169,7 @@ Use Cases
     # Full resource box: time + memory + CPU limits together
     timeout --mem-limit 512M --cpu-percent 25 --cpu-time 5m 30m ./untrusted-script
 
-> **Why this matters:** macOS has no cgroups. `ulimit` memory limits don't work. Until now, there was no way to enforce resource limits on a single command without containers or third-party daemons. darwin-timeout brings Linux-style resource control to macOS, in 100KB.
+> **Why this matters:** macOS has no cgroups. `ulimit` memory limits don't work. Until now, there was no way to enforce resource limits on a single command without containers or third-party daemons. darwin-timeout brings Linux-style resource control to macOS, in ~100KB.
 
 Options
 -------
@@ -316,7 +316,7 @@ Built on Darwin kernel primitives:
 - **Signal forwarding**: SIGTERM/SIGINT/SIGHUP/SIGQUIT/SIGUSR1/SIGUSR2 forwarded to child process group
 - **Process groups**: child runs in own group so signals reach all descendants
 
-100KB `no_std` binary. Custom allocator, direct syscalls, no libstd runtime.
+~100KB `no_std` binary. Custom allocator, direct syscalls, no libstd runtime.
 
 Benchmarks
 ----------
@@ -325,7 +325,7 @@ All benchmarks on Apple M4 Pro, macOS Tahoe 26.2, hyperfine 1.20.0.
 See [docs/benchmarks/](docs/benchmarks/) for raw data and methodology.
 
     # Binary size
-    darwin-timeout: 100KB
+    darwin-timeout: ~100KB
     GNU coreutils:  15.7MB (157x larger)
 
     # Startup overhead (250 runs across 5 sessions)

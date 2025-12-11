@@ -51,7 +51,6 @@ kani setup
 
 ### Code Style
 
-- lowercase comments, no fluff
 - `/* */` for inline, `//` for end-of-line
 - no floats (they bloat binary by ~8KB)
 - no std except in tests
@@ -214,7 +213,7 @@ src/
 
 Target: **≤150KB** release binary
 
-Current: ~116KB
+Current: ~118KB
 
 Every byte matters. Before adding dependencies or features, consider size impact:
 
