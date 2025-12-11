@@ -93,6 +93,13 @@ fn parse_decimal_to_nanos(s: &str) -> Result<u128> {
         None => (s, ""),
     };
 
+    /* reject bare "." - need at least one digit */
+    if int_part.is_empty() && frac_part.is_empty() {
+        return Err(TimeoutError::InvalidDuration(
+            "invalid number '.'".to_string(),
+        ));
+    }
+
     /* parse integer part */
     let int_val: u128 = if int_part.is_empty() {
         0
@@ -198,6 +205,13 @@ mod tests {
     fn test_invalid_empty() {
         assert!(parse_duration("").is_err());
         assert!(parse_duration("   ").is_err());
+    }
+
+    #[test]
+    fn test_invalid_bare_dot() {
+        /* proptest regression: "." should not parse as Duration::ZERO */
+        assert!(parse_duration(".").is_err());
+        assert!(parse_duration(".s").is_err());
     }
 
     #[test]
