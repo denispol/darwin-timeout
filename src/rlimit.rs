@@ -12,7 +12,8 @@ use core::time::Duration;
 
 use crate::error::{Result, TimeoutError};
 
-#[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(test, derive(Debug))]
+#[derive(Clone, Copy, Default)]
 pub struct ResourceLimits {
     pub mem_bytes: Option<u64>,     /* RLIMIT_AS */
     pub cpu_time: Option<Duration>, /* RLIMIT_CPU (seconds) */
