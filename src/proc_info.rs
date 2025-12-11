@@ -208,7 +208,8 @@ mod kani_proofs {
         let offset: usize = kani::any();
 
         /* only test valid offsets that allow reading 8 bytes */
-        kani::assume(offset + 8 <= RUSAGE_BUFFER_SIZE);
+        /* check offset first to avoid overflow in offset + 8 */
+        kani::assume(offset <= RUSAGE_BUFFER_SIZE.saturating_sub(8));
 
         /* read_u64 should not panic */
         let _result = read_u64(&buf, offset);
