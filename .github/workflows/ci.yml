@@ -40,12 +40,6 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Security audit
-        continue-on-error: true
-        run: |
-          cargo install cargo-audit --locked
-          cargo audit
-
   # Test on macOS after lint passes.
   # x86_64 binary is cross-compiled and verified in release workflow.
   # Intel-specific CI runners (macos-15-large) require paid plan.
