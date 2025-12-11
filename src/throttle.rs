@@ -368,6 +368,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_resume_when_not_suspended() {
         /* resume on non-suspended state should be safe no-op */
         // SAFETY: getpid() always succeeds
