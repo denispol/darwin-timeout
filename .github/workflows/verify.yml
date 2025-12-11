@@ -1,9 +1,11 @@
-# Verification workflow - cargo-fuzz and kani
+# Verification workflow - path-based auto-triggering
 #
-# Runs on PRs touching src/*.rs to verify:
-# - fuzz targets compile (cargo fuzz check)
-# - kani proofs pass (cargo kani)
-# - miri detects no UB in non-FFI tests (cargo miri test)
+# Jobs run automatically based on which files changed:
+# - kani: safety-critical files (sync, process, throttle, proc_info, time_math)
+# - fuzz: parsing files (duration, signal, args, rlimit)
+# - miri: always (fast UB detection)
+#
+# See CONTRIBUTING.md "CI Auto-Verification Rules" for the full mapping.
 
 name: Verification
 
@@ -25,25 +27,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  fuzz-check:
-    name: Fuzz Targets Compile
-    runs-on: macos-latest
+  # Detect which files changed to determine which jobs to run
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      kani: ${{ steps.filter.outputs.kani }}
+      fuzz: ${{ steps.filter.outputs.fuzz }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            kani:
+              - 'src/sync.rs'
+              - 'src/process.rs'
+              - 'src/throttle.rs'
+              - 'src/proc_info.rs'
+              - 'src/time_math.rs'
+            fuzz:
+              - 'src/duration.rs'
+              - 'src/signal.rs'
+              - 'src/args.rs'
+              - 'src/rlimit.rs'
+              - 'fuzz/**/*.rs'
 
-      - name: Install Rust nightly (for cargo-fuzz)
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
-
-      - name: Check fuzz targets compile
-        run: |
-          cd fuzz
-          cargo fuzz check
-
+  # Kani: formal verification for safety-critical modules
+  # Auto-triggered when: sync.rs, process.rs, throttle.rs, proc_info.rs, time_math.rs
   kani:
-    name: Kani Proofs
+    name: Kani Proofs (19)
+    needs: changes
+    if: needs.changes.outputs.kani == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +71,51 @@ jobs:
       - name: Run Kani proofs
         run: cargo kani --tests
 
+  # Fuzz: coverage-guided fuzzing for parsing modules
+  # Auto-triggered when: duration.rs, signal.rs, args.rs, rlimit.rs, fuzz/**
+  fuzz:
+    name: Fuzz Targets (4×60s)
+    needs: changes
+    if: needs.changes.outputs.fuzz == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Fuzz parse_duration
+        run: cargo +nightly fuzz run parse_duration -- -max_total_time=60
+
+      - name: Fuzz parse_signal
+        run: cargo +nightly fuzz run parse_signal -- -max_total_time=60
+
+      - name: Fuzz parse_args
+        run: cargo +nightly fuzz run parse_args -- -max_total_time=60
+
+      - name: Fuzz parse_mem_limit
+        run: cargo +nightly fuzz run parse_mem_limit -- -max_total_time=60
+
+  # Fuzz compile check: always verify fuzz targets compile
+  fuzz-check:
+    name: Fuzz Targets Compile
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Check fuzz targets compile
+        run: cd fuzz && cargo fuzz check
+
+  # Miri: always run (fast, catches UB in pure Rust)
   miri:
     name: Miri UB Detection
     runs-on: ubuntu-latest
@@ -71,6 +131,4 @@ jobs:
         run: cargo miri setup
 
       - name: Run Miri tests
-        # Run non-FFI tests under Miri
-        # FFI tests are skipped via #[cfg_attr(miri, ignore)]
         run: cargo miri test --lib

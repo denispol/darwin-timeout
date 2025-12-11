@@ -60,6 +60,41 @@ kani setup
 
 This project uses a multi-layered verification approach. Different changes require different levels of testing.
 
+### CI Auto-Verification Rules
+
+CI automatically triggers extra verification based on which files you change. **If you add a new safety-critical module or parser, you must add it to the CI path filters.**
+
+| File Changed | Auto-Triggered CI Jobs |
+|--------------|----------------------|
+| `src/sync.rs` | kani (19 proofs) |
+| `src/process.rs` | kani |
+| `src/throttle.rs` | kani |
+| `src/proc_info.rs` | kani |
+| `src/time_math.rs` | kani |
+| `src/duration.rs` | fuzz (4×60s) |
+| `src/signal.rs` | fuzz |
+| `src/args.rs` | fuzz |
+| `src/rlimit.rs` | fuzz |
+| `fuzz/**/*.rs` | fuzz |
+| Any `src/*.rs` | miri, fuzz-check |
+
+**Always runs (every PR):**
+- `cargo fmt --check`
+- `cargo clippy -- -D warnings`
+- `cargo audit` (security)
+- `cargo test --lib` (152 unit tests)
+- `cargo test --test integration` (167 tests)
+- `cargo test --test proptest` (30 properties)
+- Binary size check (≤150KB)
+- Symbol count check (≤100)
+
+**Path-triggered (automatic):**
+- **Kani proofs**: When safety-critical files change (sync, process, throttle, proc_info, time_math)
+- **Fuzz execution**: When parsing files change (duration, signal, args, rlimit)
+- **Miri UB detection**: Always runs on any Rust file change
+
+> ⚠️ **Adding new modules**: If you add a new module with `unsafe` code or state machines, add it to `.github/workflows/verify.yml` kani paths. If you add a new parser, add it to the fuzz paths.
+
 ### Verification Pyramid
 
 ```
