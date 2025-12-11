@@ -34,6 +34,14 @@ pub fn parse_mem_limit(input: &str) -> Result<u64> {
     }
 
     let (num, suffix) = split_number_suffix(s);
+
+    /* require at least one digit - reject bare suffixes like "G" */
+    if num.is_empty() {
+        return Err(TimeoutError::InvalidMemoryLimit(format!(
+            "no numeric value in '{s}'"
+        )));
+    }
+
     let value = parse_u64(num)
         .map_err(|_| TimeoutError::InvalidMemoryLimit(format!("invalid memory value: '{s}'")))?;
 
@@ -225,5 +233,13 @@ mod tests {
         /* zero is technically valid (no limit), but useless */
         assert_eq!(parse_mem_limit("0").unwrap(), 0);
         assert_eq!(parse_mem_limit("0M").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_parse_mem_limit_bare_suffix_rejected() {
+        /* proptest regression: "G" with no number should fail */
+        assert!(parse_mem_limit("G").is_err());
+        assert!(parse_mem_limit("M").is_err());
+        assert!(parse_mem_limit("KB").is_err());
     }
 }

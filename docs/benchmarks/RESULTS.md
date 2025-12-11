@@ -72,7 +72,7 @@ Raw data: [retry_overhead.json](retry_overhead.json)
 ## Binary Size
 
 ```
-darwin-timeout: 100KB (101984 bytes)
+darwin-timeout: ~100KB (101984 bytes)
 GNU coreutils:  15.7MB
 Ratio:          157x smaller
 ```

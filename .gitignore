@@ -1,5 +1,18 @@
 # Build artifacts
 /target
+/fuzz/target
+/fuzz/artifacts
+/fuzz/coverage
+
+# Fuzz corpus - keep seeds, ignore expanded corpus
+# seed files follow naming pattern: valid_*, invalid_*, empty, overflow, etc
+# expanded corpus has hex names like a1b2c3d4e5f6...
+/fuzz/corpus/*
+!/fuzz/corpus/**/valid_*
+!/fuzz/corpus/**/invalid_*
+!/fuzz/corpus/**/empty
+!/fuzz/corpus/**/overflow*
+!/fuzz/corpus/**/edge_*
 
 # Cargo lock is committed for binaries (reproducible builds)
 # Cargo.lock

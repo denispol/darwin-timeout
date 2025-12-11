@@ -1,0 +1,49 @@
+[package]
+name = "darwin-timeout-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.darwin-timeout]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "parse_duration"
+path = "fuzz_targets/parse_duration.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_signal"
+path = "fuzz_targets/parse_signal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_args"
+path = "fuzz_targets/parse_args.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_mem_limit"
+path = "fuzz_targets/parse_mem_limit.rs"
+test = false
+doc = false
+bench = false

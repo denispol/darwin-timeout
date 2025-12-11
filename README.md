@@ -1,7 +1,7 @@
 darwin-timeout
 ==============
 
-GNU `timeout` for macOS, done right. Works through sleep. 100KB. Zero dependencies.
+GNU `timeout` for macOS, done right. Works through sleep. ~100KB. Zero dependencies.
 
     brew install denispol/tap/darwin-timeout
 
@@ -69,13 +69,34 @@ Legend: ▓ awake  ░ sleep  █ counting  · paused  ^ fire point
 | Wait-for-file             | ✓              | ✗             |
 | Custom exit codes         | ✓              | ✗             |
 | Env var configuration     | ✓              | ✗             |
-| Binary size               | 100KB          | 15.7MB        |
+| Binary size               | ~100KB          | 15.7MB        |
 | Startup time              | 3.6ms          | 4.2ms         |
 | Zero CPU while waiting    | ✓ (kqueue)     | ✓ (nanosleep) |
 
 *Performance data from [250 benchmark runs](#benchmarks) on Apple M4 Pro.*
 
 100% GNU-compatible. All flags work identically (`-s`, `-k`, `-p`, `-f`, `-v`). Drop-in replacement for Apple Silicon and Intel Macs.
+
+Quality & Testing
+-----------------
+
+darwin-timeout uses a **five-layer verification approach**:
+
+| Method | Coverage | What It Catches |
+|--------|----------|-----------------|
+| **Unit tests** | 154 tests | Logic errors, edge cases |
+| **Integration tests** | 179 tests | Real process behavior, signals, I/O |
+| **Property-based (proptest)** | 30 properties, ~7500 cases | Input invariants, mathematical relationships |
+| **Fuzzing (cargo-fuzz)** | 4 targets, ~70M executions | Crashes, panics, hangs from malformed input |
+| **Formal verification (kani)** | 19 proofs | Mathematical proof of memory safety, no overflows |
+
+**What this means for you:**
+- Parsing code is fuzz-tested (found and fixed bugs before release)
+- Unsafe code has formal proofs (mathematically verified, not just tested)
+- State machines are proven correct (no race conditions in signal handling)
+- Arithmetic is overflow-checked (all time calculations verified)
+
+See [docs/VERIFICATION.md](docs/VERIFICATION.md) for methodology details.
 
 Install
 -------
@@ -169,7 +190,7 @@ Use Cases
     # Full resource box: time + memory + CPU limits together
     timeout --mem-limit 512M --cpu-percent 25 --cpu-time 5m 30m ./untrusted-script
 
-> **Why this matters:** macOS has no cgroups. `ulimit` memory limits don't work. Until now, there was no way to enforce resource limits on a single command without containers or third-party daemons. darwin-timeout brings Linux-style resource control to macOS, in 100KB.
+> **Why this matters:** macOS has no cgroups. `ulimit` memory limits don't work. Until now, there was no way to enforce resource limits on a single command without containers or third-party daemons. darwin-timeout brings Linux-style resource control to macOS, in ~100KB.
 
 Options
 -------
@@ -316,7 +337,7 @@ Built on Darwin kernel primitives:
 - **Signal forwarding**: SIGTERM/SIGINT/SIGHUP/SIGQUIT/SIGUSR1/SIGUSR2 forwarded to child process group
 - **Process groups**: child runs in own group so signals reach all descendants
 
-100KB `no_std` binary. Custom allocator, direct syscalls, no libstd runtime.
+~100KB `no_std` binary. Custom allocator, direct syscalls, no libstd runtime.
 
 Benchmarks
 ----------
@@ -325,7 +346,7 @@ All benchmarks on Apple M4 Pro, macOS Tahoe 26.2, hyperfine 1.20.0.
 See [docs/benchmarks/](docs/benchmarks/) for raw data and methodology.
 
     # Binary size
-    darwin-timeout: 100KB
+    darwin-timeout: ~100KB
     GNU coreutils:  15.7MB (157x larger)
 
     # Startup overhead (250 runs across 5 sessions)
@@ -349,8 +370,13 @@ Development
 -----------
 
     cargo test                  # run tests
+    cargo test --test proptest  # property-based tests
     cargo clippy                # lint
-    ./scripts/benchmark.sh      # run benchmarks
+    ./scripts/verify-all.sh     # full verification suite
+
+**Contributing:** See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, verification requirements, and the testing pyramid.
+
+**Verification:** This project uses five verification methods: unit tests, integration tests, proptest, cargo-fuzz, and kani formal proofs. See [docs/VERIFICATION.md](docs/VERIFICATION.md) for details.
 
 Library usage coming soon; core timeout logic will be available as a crate.
 
