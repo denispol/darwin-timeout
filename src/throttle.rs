@@ -196,6 +196,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_get_cpu_core_count() {
         /* verify we can read core count from sysctl */
         let cores = get_cpu_core_count();
