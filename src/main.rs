@@ -274,6 +274,8 @@ fn run_main() -> u8 {
                     exit_code,
                     attempts.as_slice(),
                     config.retry_count,
+                    &config.limits,
+                    config.cpu_throttle,
                 );
             }
 
@@ -304,9 +306,11 @@ fn print_json_output(
     exit_code: u8,
     attempts: &[AttemptResult],
     retry_count: u32,
+    limits: &darwin_timeout::ResourceLimits,
+    cpu_throttle: Option<darwin_timeout::throttle::CpuThrottleConfig>,
 ) {
-    /* Schema version 5: added timeout_reason field for stdin idle timeout */
-    const SCHEMA_VERSION: u8 = 5;
+    /* Schema version 7: memory limit exceeded status */
+    const SCHEMA_VERSION: u8 = 7;
 
     /* helper to append rusage fields to JSON string */
     fn append_rusage(json: &mut String, rusage: Option<&darwin_timeout::process::ResourceUsage>) {
@@ -345,6 +349,44 @@ fn print_json_output(
         json.push(']');
     }
 
+    /* helper to append resource limits metadata if configured */
+    fn append_limits(
+        json: &mut String,
+        limits: &darwin_timeout::ResourceLimits,
+        cpu_throttle: Option<darwin_timeout::throttle::CpuThrottleConfig>,
+    ) {
+        if limits.mem_bytes.is_none() && limits.cpu_time.is_none() && cpu_throttle.is_none() {
+            return;
+        }
+
+        json.push_str(r#","limits":{"#);
+        let mut wrote = false;
+        if let Some(bytes) = limits.mem_bytes {
+            let _ = write!(json, r#""mem_bytes":{}"#, bytes);
+            wrote = true;
+        }
+        if let Some(cpu) = limits.cpu_time {
+            if wrote {
+                json.push(',');
+            }
+            let _ = write!(json, r#""cpu_time_ms":{}"#, cpu.as_millis());
+            wrote = true;
+        }
+        if let Some(cfg) = cpu_throttle {
+            if wrote {
+                json.push(',');
+            }
+            let _ = write!(
+                json,
+                r#""cpu_percent":{},"cpu_interval_ms":{},"cpu_sleep_ms":{}"#,
+                cfg.percent.get(),
+                cfg.interval_ns / 1_000_000,
+                cfg.sleep_ns / 1_000_000
+            );
+        }
+        json.push('}');
+    }
+
     match result {
         RunResult::Completed { status, rusage } => {
             let code = status.code().unwrap_or(-1);
@@ -356,6 +398,7 @@ fn print_json_output(
             );
             append_rusage(&mut json, Some(rusage));
             append_attempts(&mut json, attempts, retry_count);
+            append_limits(&mut json, limits, cpu_throttle);
             json.push('}');
             println!("{}", json);
         }
@@ -414,6 +457,40 @@ fn print_json_output(
             }
 
             append_attempts(&mut json, attempts, retry_count);
+            append_limits(&mut json, limits, cpu_throttle);
+            json.push('}');
+            println!("{}", json);
+        }
+        RunResult::MemoryLimitExceeded {
+            signal,
+            killed,
+            status,
+            rusage,
+            limit_bytes,
+            actual_bytes,
+        } => {
+            let sig_num = darwin_timeout::signal::signal_number(*signal);
+            let status_code = status.and_then(|s| s.code()).unwrap_or(-1);
+            let sig_name = darwin_timeout::signal::signal_name(*signal);
+
+            let mut json = String::with_capacity(512);
+            let _ = write!(
+                json,
+                r#"{{"schema_version":{},"status":"memory_limit","signal":"{}","signal_num":{},"killed":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{},"limit_bytes":{},"actual_bytes":{}"#,
+                SCHEMA_VERSION,
+                sig_name,
+                sig_num,
+                killed,
+                status_code,
+                exit_code,
+                elapsed_ms,
+                limit_bytes,
+                actual_bytes
+            );
+
+            append_rusage(&mut json, rusage.as_ref());
+            append_attempts(&mut json, attempts, retry_count);
+            append_limits(&mut json, limits, cpu_throttle);
             json.push('}');
             println!("{}", json);
         }
@@ -437,6 +514,7 @@ fn print_json_output(
             );
             append_rusage(&mut json, rusage.as_ref());
             append_attempts(&mut json, attempts, retry_count);
+            append_limits(&mut json, limits, cpu_throttle);
             json.push('}');
             println!("{}", json);
         }
@@ -444,7 +522,7 @@ fn print_json_output(
 }
 
 fn print_json_error(err: &darwin_timeout::error::TimeoutError, elapsed_ms: u64) {
-    const SCHEMA_VERSION: u8 = 5;
+    const SCHEMA_VERSION: u8 = 7;
 
     let exit_code = err.exit_code();
     /* Escape control characters for valid JSON */

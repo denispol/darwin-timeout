@@ -28,12 +28,18 @@ pub enum TimeoutError {
     InvalidDuration(String),
     NegativeDuration,
     DurationOverflow,
+    InvalidMemoryLimit(String),
+    InvalidCpuTime(String),
+    InvalidCpuPercent(String),
     InvalidSignal(String),
     CommandNotFound(String),
     PermissionDenied(String),
     SpawnError(i32),  // errno from spawn
     SignalError(i32), // errno from libc signal calls
     ProcessGroupError(String),
+    ResourceLimitError(i32),
+    ThrottleAttachError(i32),
+    ThrottleControlError(i32),
     Internal(String),
     WaitForFileTimeout(String), // file path that we timed out waiting for
     WaitForFileError(String, i32), // file path + errno from stat
@@ -46,12 +52,22 @@ impl fmt::Display for TimeoutError {
             Self::InvalidDuration(s) => write!(f, "invalid duration: {s}"),
             Self::NegativeDuration => write!(f, "invalid duration: negative values not allowed"),
             Self::DurationOverflow => write!(f, "invalid duration: value too large"),
+            Self::InvalidMemoryLimit(s) => write!(f, "invalid memory limit: {s}"),
+            Self::InvalidCpuTime(s) => write!(f, "invalid cpu time: {s}"),
+            Self::InvalidCpuPercent(s) => write!(f, "invalid cpu percent: {s}"),
             Self::InvalidSignal(s) => write!(f, "invalid signal: {s}"),
             Self::CommandNotFound(s) => write!(f, "command not found: {s}"),
             Self::PermissionDenied(s) => write!(f, "permission denied: {s}"),
             Self::SpawnError(errno) => write!(f, "failed to spawn process: errno {errno}"),
             Self::SignalError(errno) => write!(f, "signal error: errno {errno}"),
             Self::ProcessGroupError(s) => write!(f, "process group error: {s}"),
+            Self::ResourceLimitError(errno) => write!(f, "failed to apply resource limits: errno {errno}"),
+            Self::ThrottleAttachError(errno) => {
+                write!(f, "failed to attach CPU throttle: kern_return {errno}")
+            }
+            Self::ThrottleControlError(errno) => {
+                write!(f, "failed to control CPU throttle: kern_return {errno}")
+            }
             Self::Internal(s) => write!(f, "internal error: {s}"),
             Self::WaitForFileTimeout(path) => write!(f, "timed out waiting for file: {path}"),
             Self::WaitForFileError(path, errno) => {
@@ -74,10 +90,16 @@ impl TimeoutError {
             Self::InvalidDuration(_)
             | Self::NegativeDuration
             | Self::DurationOverflow
+            | Self::InvalidMemoryLimit(_)
+            | Self::InvalidCpuTime(_)
+            | Self::InvalidCpuPercent(_)
             | Self::InvalidSignal(_)
             | Self::SpawnError(_)
             | Self::SignalError(_)
             | Self::ProcessGroupError(_)
+            | Self::ResourceLimitError(_)
+            | Self::ThrottleAttachError(_)
+            | Self::ThrottleControlError(_)
             | Self::Internal(_)
             | Self::WaitForFileError(_, _)
             | Self::TimebaseError => exit_codes::INTERNAL_ERROR,

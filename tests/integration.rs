@@ -1588,28 +1588,28 @@ fn test_quiet_verbose_conflict() {
 #[test]
 fn test_json_schema_version() {
     /*
-     * All JSON output should include schema_version field (version 5 with timeout_reason)
+     * All JSON output should include schema_version field (version 7 with memory limit)
      */
     /* Test completed */
     timeout_cmd()
         .args(["--json", "5s", "true"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""schema_version":5"#));
+        .stdout(predicate::str::contains(r#""schema_version":7"#));
 
     /* Test timeout */
     timeout_cmd()
         .args(["--json", "0.1s", "sleep", "10"])
         .assert()
         .code(124)
-        .stdout(predicate::str::contains(r#""schema_version":5"#));
+        .stdout(predicate::str::contains(r#""schema_version":7"#));
 
     /* Test error */
     timeout_cmd()
         .args(["--json", "5s", "nonexistent_command_xyz_12345"])
         .assert()
         .code(127)
-        .stdout(predicate::str::contains(r#""schema_version":5"#));
+        .stdout(predicate::str::contains(r#""schema_version":7"#));
 }
 
 #[test]
