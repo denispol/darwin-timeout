@@ -27,9 +27,13 @@ use core::time::Duration;
 use crate::args::{Confine, OwnedArgs};
 use crate::duration::{is_no_timeout, parse_duration};
 use crate::error::{Result, TimeoutError, exit_codes};
-use crate::process::{RawChild, RawExitStatus, ResourceUsage, SpawnError, spawn_command};
+use crate::process::{
+    RawChild, RawExitStatus, ResourceUsage, SpawnError, spawn_command, spawn_command_with_limits,
+};
+use crate::rlimit::{ResourceLimits, parse_cpu_percent, parse_cpu_time, parse_mem_limit};
 use crate::signal::{Signal, parse_signal, signal_name, signal_number};
 use crate::sync::AtomicOnce;
+use crate::throttle::{CpuThrottleConfig, CpuThrottleState};
 use crate::time_math::{
     advance_ns, deadline_reached, elapsed_ns, remaining_ns, time_to_idle_timeout,
 };
@@ -431,12 +435,31 @@ pub enum RunResult {
         hook: Option<HookResult>, /* on-timeout hook result if configured */
         reason: TimeoutReason,    /* what triggered the timeout */
     },
+    MemoryLimitExceeded {
+        signal: Signal,
+        killed: bool,
+        status: Option<RawExitStatus>,
+        rusage: Option<ResourceUsage>,
+        limit_bytes: u64,  /* the limit that was exceeded */
+        actual_bytes: u64, /* memory usage when limit was hit */
+    },
     SignalForwarded {
         /* we got SIGTERM/SIGINT/SIGHUP, passed it on */
         signal: Signal,
         status: Option<RawExitStatus>,
         rusage: Option<ResourceUsage>,
     },
+}
+
+pub struct ThrottleContext {
+    pub cfg: CpuThrottleConfig,
+    pub state: CpuThrottleState,
+}
+
+/* memory limit enforcement config */
+struct MemoryLimitConfig {
+    limit_bytes: u64,
+    check_interval_ns: u64,
 }
 
 /// Reason for timeout (wall clock vs stdin idle)
@@ -474,6 +497,25 @@ impl RunResult {
                     timeout_exit_code
                 }
             }
+            Self::MemoryLimitExceeded {
+                signal,
+                killed,
+                status,
+                ..
+            } => {
+                /* same as timeout - memory limit is a resource limit timeout */
+                if preserve_status {
+                    status.map_or_else(
+                        || {
+                            let sig = if *killed { Signal::SIGKILL } else { *signal };
+                            signal_exit_code(sig)
+                        },
+                        |s| status_to_exit_code(&s),
+                    )
+                } else {
+                    timeout_exit_code
+                }
+            }
             Self::SignalForwarded { signal, status, .. } => {
                 /* We got killed by a signal - return 128 + signum like the child would */
                 status.map_or_else(|| signal_exit_code(*signal), |s| status_to_exit_code(&s))
@@ -487,6 +529,7 @@ impl RunResult {
         match self {
             Self::Completed { rusage, .. } => Some(rusage),
             Self::TimedOut { rusage, .. } => rusage.as_ref(),
+            Self::MemoryLimitExceeded { rusage, .. } => rusage.as_ref(),
             Self::SignalForwarded { rusage, .. } => rusage.as_ref(),
         }
     }
@@ -527,6 +570,8 @@ pub struct RunConfig {
     pub heartbeat: Option<Duration>,     /* print status to stderr at this interval */
     pub stdin_timeout: Option<Duration>, /* timeout if stdin has no activity */
     pub stdin_passthrough: bool,         /* non-consuming stdin idle detection */
+    pub limits: ResourceLimits,          /* RLIMIT_AS / RLIMIT_CPU */
+    pub cpu_throttle: Option<CpuThrottleConfig>, /* CPU percent throttling */
 }
 
 impl RunConfig {
@@ -591,6 +636,48 @@ impl RunConfig {
             .map(|s| parse_duration(s))
             .transpose()?;
 
+        /* parse resource limits */
+        let mem_limit = args
+            .mem_limit
+            .as_ref()
+            .map(|s| parse_mem_limit(s))
+            .transpose()?;
+
+        let cpu_time = args
+            .cpu_time
+            .as_ref()
+            .map(|s| parse_cpu_time(s))
+            .transpose()?;
+
+        let limits = ResourceLimits {
+            mem_bytes: mem_limit,
+            cpu_time,
+        };
+
+        /* parse CPU throttle percent */
+        let cpu_throttle = args
+            .cpu_percent
+            .as_ref()
+            .map(|s| parse_cpu_percent(s))
+            .transpose()?;
+
+        /* warn if cpu-percent is very low - may cause stuttery execution */
+        if let Some(ref pct) = cpu_throttle
+            && pct.get() < 10
+            && !args.quiet
+        {
+            crate::eprintln!(
+                "warning: --cpu-percent {} is very low; may cause stuttery execution",
+                pct.get()
+            );
+        }
+
+        let cpu_throttle = cpu_throttle.map(|percent| CpuThrottleConfig {
+            percent,
+            interval_ns: duration_to_ns(Duration::from_millis(100)),
+            sleep_ns: duration_to_ns(Duration::from_millis(50)),
+        });
+
         if args.stdin_passthrough && stdin_timeout.is_none() {
             return Err(TimeoutError::Internal(
                 "--stdin-passthrough requires --stdin-timeout".to_string(),
@@ -623,6 +710,8 @@ impl RunConfig {
             heartbeat,
             stdin_timeout,
             stdin_passthrough: args.stdin_passthrough,
+            limits,
+            cpu_throttle,
         })
     }
 }
@@ -633,8 +722,13 @@ impl RunConfig {
 pub fn run_command(command: &str, args: &[String], config: &RunConfig) -> Result<RunResult> {
     /* put child in its own process group unless foreground mode */
     let use_process_group = !config.foreground;
+    let spawn_result = if config.limits.is_empty() {
+        spawn_command(command, args, use_process_group)
+    } else {
+        spawn_command_with_limits(command, args, use_process_group, &config.limits)
+    };
 
-    let mut child = spawn_command(command, args, use_process_group).map_err(|e| match e {
+    let mut child = spawn_result.map_err(|e| match e {
         SpawnError::NotFound(s) => TimeoutError::CommandNotFound(s),
         SpawnError::PermissionDenied(s) => TimeoutError::PermissionDenied(s),
         SpawnError::Spawn(errno) => TimeoutError::SpawnError(errno),
@@ -706,7 +800,7 @@ pub fn run_with_retry(
             / 1_000_000;
 
         match &result {
-            RunResult::TimedOut { .. } => {
+            RunResult::TimedOut { .. } | RunResult::MemoryLimitExceeded { .. } => {
                 attempts.push(AttemptResult {
                     status: "timeout",
                     exit_code: None,
@@ -791,6 +885,21 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
     let pid = child.id() as i32;
     let start_ns = precise_now_ns(config.confine)?;
 
+    /* set up CPU throttle state if enabled */
+    let mut throttle_ctx = if let Some(cfg) = config.cpu_throttle {
+        match CpuThrottleState::new(pid, start_ns) {
+            Ok(state) => Some(ThrottleContext { cfg, state }),
+            Err(e) => {
+                if !config.quiet {
+                    crate::eprintln!("timeout: warning: CPU throttle disabled ({})", e);
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     /* build heartbeat config if enabled */
     let heartbeat_config = config.heartbeat.map(|interval| HeartbeatConfig {
         interval_ns: duration_to_ns(interval),
@@ -810,6 +919,15 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
         },
     });
 
+    /* build memory limit config if enabled */
+    let memory_limit_config = config
+        .limits
+        .mem_bytes
+        .map(|limit_bytes| MemoryLimitConfig {
+            limit_bytes,
+            check_interval_ns: duration_to_ns(Duration::from_millis(100)), /* poll every 100ms */
+        });
+
     /* wait for exit or timeout */
     let exit_result = wait_with_kqueue(
         child,
@@ -818,6 +936,8 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
         config.confine,
         heartbeat_config,
         stdin_timeout_config,
+        throttle_ctx.as_mut(),
+        memory_limit_config,
     )?;
 
     /* track which timeout triggered */
@@ -828,6 +948,10 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
 
     match exit_result {
         WaitResult::Exited(status, rusage) => {
+            /* process already reaped - mark as exited to prevent PID recycling issues */
+            if let Some(ref mut ctx) = throttle_ctx {
+                ctx.state.mark_process_exited();
+            }
             return Ok(RunResult::Completed { status, rusage });
         }
         WaitResult::ReceivedSignal(sig) => {
@@ -835,17 +959,120 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
             if config.verbose && !config.quiet {
                 crate::eprintln!("timeout: forwarding signal {} to command", signal_name(sig));
             }
+            /* resume if throttle had it stopped - prevents deadlock */
+            if let Some(ref mut ctx) = throttle_ctx {
+                ctx.state.resume();
+            }
             send_signal(pid, sig, config.foreground)?;
             /* wait for child - extract rusage even if wait returns error (child exited) */
             let (status, rusage) = match child.wait() {
                 Ok((s, r)) => (Some(s), Some(r)),
                 Err(_) => (None, None), /* child already reaped or wait failed */
             };
+            /* mark process exited to prevent PID recycling issues in Drop */
+            if let Some(ref mut ctx) = throttle_ctx {
+                ctx.state.mark_process_exited();
+            }
             return Ok(RunResult::SignalForwarded {
                 signal: sig,
                 status,
                 rusage,
             });
+        }
+        WaitResult::MemoryLimitExceeded {
+            limit_bytes,
+            actual_bytes,
+        } => {
+            /* memory limit exceeded - kill process and return error */
+            if config.verbose && !config.quiet {
+                crate::eprintln!(
+                    "timeout: memory limit exceeded ({} bytes > {} bytes limit)",
+                    actual_bytes,
+                    limit_bytes
+                );
+            }
+
+            /* resume if throttle had it stopped - prevents deadlock */
+            if let Some(ref mut ctx) = throttle_ctx {
+                ctx.state.resume();
+            }
+
+            /* send SIGTERM first */
+            send_signal(pid, config.signal, config.foreground)?;
+
+            /* wait for child with kill_after grace period if configured */
+            if let Some(kill_after) = config.kill_after {
+                /* throttle disabled - process needs to run signal handler */
+                let grace_result = wait_with_kqueue(
+                    child,
+                    pid,
+                    kill_after,
+                    config.confine,
+                    None,
+                    None,
+                    None, /* throttle disabled during grace period */
+                    None, /* no memory limit during grace period */
+                )?;
+
+                match grace_result {
+                    WaitResult::Exited(status, rusage) => {
+                        /* mark process exited to prevent PID recycling issues */
+                        if let Some(ref mut ctx) = throttle_ctx {
+                            ctx.state.mark_process_exited();
+                        }
+                        return Ok(RunResult::MemoryLimitExceeded {
+                            signal: config.signal,
+                            killed: false,
+                            status: Some(status),
+                            rusage: Some(rusage),
+                            limit_bytes,
+                            actual_bytes,
+                        });
+                    }
+                    _ => {
+                        /* Still alive after grace period - SIGKILL */
+                        /* resume if throttle had it stopped - prevents deadlock */
+                        if let Some(ref mut ctx) = throttle_ctx {
+                            ctx.state.resume();
+                        }
+                        send_signal(pid, Signal::SIGKILL, config.foreground)?;
+                        let (status, rusage) = child.wait().map_err(|e| match e {
+                            SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
+                            _ => TimeoutError::Internal("wait failed".to_string()),
+                        })?;
+                        /* mark process exited to prevent PID recycling issues */
+                        if let Some(ref mut ctx) = throttle_ctx {
+                            ctx.state.mark_process_exited();
+                        }
+                        return Ok(RunResult::MemoryLimitExceeded {
+                            signal: config.signal,
+                            killed: true,
+                            status: Some(status),
+                            rusage: Some(rusage),
+                            limit_bytes,
+                            actual_bytes,
+                        });
+                    }
+                }
+            } else {
+                /* No kill-after, just wait for it to die */
+                let (status, rusage) = child.wait().map_err(|e| match e {
+                    SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
+                    _ => TimeoutError::Internal("wait failed".to_string()),
+                })?;
+                /* mark process exited to prevent PID recycling issues */
+                if let Some(ref mut ctx) = throttle_ctx {
+                    ctx.state.mark_process_exited();
+                }
+                return Ok(RunResult::MemoryLimitExceeded {
+                    signal: config.signal,
+                    killed: false,
+                    status: Some(status),
+                    rusage: Some(rusage),
+                    limit_bytes,
+                    actual_bytes,
+                });
+            }
         }
         WaitResult::TimedOut(reason) => {
             /* Continue to timeout handling below, with the reason */
@@ -873,15 +1100,36 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
         );
     }
 
+    /* resume if throttle had it stopped - prevents deadlock.
+     * sending SIGTERM to a SIGSTOP'd process creates deadlock if child
+     * intercepts the signal (can't run handler while stopped). */
+    if let Some(ref mut ctx) = throttle_ctx {
+        ctx.state.resume();
+    }
+
     send_signal(pid, config.signal, config.foreground)?;
 
     /* if --kill-after, give it a grace period then escalate to SIGKILL */
     if let Some(kill_after) = config.kill_after {
-        /* no heartbeat or stdin timeout during grace period */
-        let grace_result = wait_with_kqueue(child, pid, kill_after, config.confine, None, None)?;
+        /* no heartbeat, stdin timeout, or throttle during grace period.
+         * throttle disabled because re-SIGSTOP would prevent signal handler. */
+        let grace_result = wait_with_kqueue(
+            child,
+            pid,
+            kill_after,
+            config.confine,
+            None,
+            None,
+            None, /* throttle disabled - process needs to run signal handler */
+            None, /* no memory limit during grace period */
+        )?;
 
         match grace_result {
             WaitResult::Exited(status, rusage) => {
+                /* mark process exited to prevent PID recycling issues */
+                if let Some(ref mut ctx) = throttle_ctx {
+                    ctx.state.mark_process_exited();
+                }
                 return Ok(RunResult::TimedOut {
                     signal: config.signal,
                     killed: false,
@@ -896,24 +1144,39 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
                 if config.verbose && !config.quiet {
                     crate::eprintln!("timeout: forwarding signal {} to command", signal_name(sig));
                 }
+                /* resume if throttle had it stopped - prevents deadlock */
+                if let Some(ref mut ctx) = throttle_ctx {
+                    ctx.state.resume();
+                }
                 send_signal(pid, sig, config.foreground)?;
                 /* wait for child - extract rusage even if wait returns error (child exited) */
                 let (status, rusage) = match child.wait() {
                     Ok((s, r)) => (Some(s), Some(r)),
                     Err(_) => (None, None), /* child already reaped or wait failed */
                 };
+                /* mark process exited to prevent PID recycling issues */
+                if let Some(ref mut ctx) = throttle_ctx {
+                    ctx.state.mark_process_exited();
+                }
                 return Ok(RunResult::SignalForwarded {
                     signal: sig,
                     status,
                     rusage,
                 });
             }
-            WaitResult::TimedOut(_) => { /* Continue to SIGKILL below */ }
+            WaitResult::TimedOut(_) | WaitResult::MemoryLimitExceeded { .. } => {
+                /* Continue to SIGKILL below - shouldn't happen during grace but handle it */
+            }
         }
 
         /* still alive? SIGKILL it */
         if config.verbose && !config.quiet {
             crate::eprintln!("timeout: sending signal SIGKILL to command");
+        }
+
+        /* resume if throttle had it stopped - prevents deadlock */
+        if let Some(ref mut ctx) = throttle_ctx {
+            ctx.state.resume();
         }
 
         send_signal(pid, Signal::SIGKILL, config.foreground)?;
@@ -922,6 +1185,11 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
             SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
             _ => TimeoutError::Internal("wait failed".to_string()),
         })?;
+
+        /* mark process exited to prevent PID recycling issues */
+        if let Some(ref mut ctx) = throttle_ctx {
+            ctx.state.mark_process_exited();
+        }
 
         Ok(RunResult::TimedOut {
             signal: config.signal,
@@ -937,6 +1205,11 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
             SpawnError::Wait(errno) => TimeoutError::SpawnError(errno),
             _ => TimeoutError::Internal("wait failed".to_string()),
         })?;
+
+        /* mark process exited to prevent PID recycling issues */
+        if let Some(ref mut ctx) = throttle_ctx {
+            ctx.state.mark_process_exited();
+        }
 
         Ok(RunResult::TimedOut {
             signal: config.signal,
@@ -955,6 +1228,10 @@ fn monitor_with_timeout(child: &mut RawChild, config: &RunConfig) -> Result<RunR
 enum WaitResult {
     Exited(RawExitStatus, ResourceUsage),
     TimedOut(TimeoutReason), /* what triggered: wall clock or stdin idle */
+    MemoryLimitExceeded {
+        limit_bytes: u64,
+        actual_bytes: u64,
+    },
     /// Received a signal that should be forwarded to the child
     ReceivedSignal(Signal),
 }
@@ -1064,6 +1341,7 @@ fn stdin_poll_status() -> StdinPollResult {
  * With stdin timeout: adds EVFILT_READ on fd 0, resets timer on activity,
  * triggers if stdin is idle for the specified duration.
  */
+#[allow(clippy::too_many_arguments)]
 fn wait_with_kqueue(
     child: &mut RawChild,
     pid: i32,
@@ -1071,9 +1349,35 @@ fn wait_with_kqueue(
     confine: Confine,
     heartbeat: Option<HeartbeatConfig>,
     mut stdin_timeout: Option<StdinTimeoutConfig>,
+    mut throttle: Option<&mut ThrottleContext>,
+    memory_limit: Option<MemoryLimitConfig>,
 ) -> Result<WaitResult> {
     let start_ns = precise_now_ns(confine)?;
     let timeout_ns = duration_to_ns(timeout);
+
+    /* throttle tracking */
+    let throttle_interval_ns = throttle
+        .as_ref()
+        .map(|t| t.cfg.interval_ns)
+        .unwrap_or(u64::MAX);
+    let mut next_throttle_ns = if throttle_interval_ns < u64::MAX {
+        throttle
+            .as_ref()
+            .map(|t| advance_ns(t.state.last_wall_ns, throttle_interval_ns))
+            .unwrap_or(u64::MAX)
+    } else {
+        u64::MAX
+    };
+
+    /* memory limit tracking */
+    let memory_check_interval_ns = memory_limit
+        .as_ref()
+        .map_or(u64::MAX, |m| m.check_interval_ns);
+    let mut next_memory_check_ns = if memory_check_interval_ns < u64::MAX {
+        advance_ns(start_ns, memory_check_interval_ns)
+    } else {
+        u64::MAX
+    };
 
     /* heartbeat tracking: next heartbeat fires at start_ns + interval, then every interval */
     let heartbeat_interval_ns = heartbeat.as_ref().map_or(0, |h| h.interval_ns);
@@ -1253,7 +1557,7 @@ fn wait_with_kqueue(
             }
         }
 
-        /* calculate next wake time: min(remaining timeout, time to next heartbeat, stdin timeout) */
+        /* calculate next wake time: min(remaining timeout, time to next heartbeat, stdin timeout, memory check) */
         let time_to_heartbeat = remaining_ns(now_ns, next_heartbeat_ns);
         let time_to_stdin_deadline = if let Some(ref stdin_cfg) = stdin_timeout {
             /* use checked helper - returns remaining time or 0 if already exceeded */
@@ -1261,9 +1565,13 @@ fn wait_with_kqueue(
         } else {
             u64::MAX
         };
+        let time_to_throttle = remaining_ns(now_ns, next_throttle_ns);
+        let time_to_memory_check = remaining_ns(now_ns, next_memory_check_ns);
         let next_wake_ns = remaining_timeout_ns
             .min(time_to_heartbeat)
-            .min(time_to_stdin_deadline);
+            .min(time_to_stdin_deadline)
+            .min(time_to_throttle)
+            .min(time_to_memory_check);
 
         /* update timer to next wake time */
         #[allow(clippy::cast_possible_wrap)]
@@ -1374,6 +1682,31 @@ fn wait_with_kqueue(
         /* got an event - check if it's a heartbeat tick or something else */
         if event.filter == libc::EVFILT_TIMER {
             let now_ns = precise_now_ns(confine)?;
+
+            /* throttle check */
+            if let Some(ref mut throttle_ctx) = throttle
+                && deadline_reached(now_ns, next_throttle_ns)
+            {
+                throttle_ctx.state.update(&throttle_ctx.cfg, now_ns)?;
+                next_throttle_ns = advance_ns(now_ns, throttle_interval_ns);
+            }
+
+            /* memory limit check */
+            if let Some(ref mem_cfg) = memory_limit
+                && deadline_reached(now_ns, next_memory_check_ns)
+            {
+                if let Some(current_bytes) = crate::proc_info::get_process_memory(pid)
+                    && current_bytes > mem_cfg.limit_bytes
+                {
+                    // SAFETY: kq is a valid fd
+                    unsafe { libc::close(kq) };
+                    return Ok(WaitResult::MemoryLimitExceeded {
+                        limit_bytes: mem_cfg.limit_bytes,
+                        actual_bytes: current_bytes,
+                    });
+                }
+                next_memory_check_ns = advance_ns(now_ns, memory_check_interval_ns);
+            }
 
             /* passthrough mode: level check without consuming data */
             if let Some(ref mut stdin_cfg) = stdin_timeout

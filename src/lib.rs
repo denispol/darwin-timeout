@@ -35,8 +35,11 @@ extern crate alloc;
 mod allocator;
 pub mod io;
 mod panic;
+pub mod proc_info;
 pub mod process;
+pub mod rlimit;
 pub mod sync;
+pub mod throttle;
 
 pub mod args;
 pub mod duration;
@@ -50,6 +53,7 @@ pub use args::Args;
 pub use duration::{is_no_timeout, parse_duration};
 pub use error::{Result, TimeoutError, exit_codes};
 pub use process::ResourceUsage;
+pub use rlimit::{ResourceLimits, parse_cpu_percent, parse_cpu_time, parse_mem_limit};
 pub use runner::{
     AttemptResult, Attempts, HookResult, MAX_RETRIES, RunConfig, RunResult, TimeoutReason,
     cleanup_signal_forwarding, run_command, run_with_retry, setup_signal_forwarding,

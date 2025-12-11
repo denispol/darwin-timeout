@@ -141,6 +141,9 @@ pub struct Args<'a> {
     pub heartbeat: Option<ArgValue<'a>>,
     pub stdin_timeout: Option<ArgValue<'a>>,
     pub stdin_passthrough: bool, /* non-consuming stdin watchdog */
+    pub mem_limit: Option<ArgValue<'a>>, /* e.g. 1G */
+    pub cpu_time: Option<ArgValue<'a>>, /* cpu seconds via rlimit */
+    pub cpu_percent: Option<ArgValue<'a>>, /* cpu throttling percentage */
     pub duration: Option<ArgValue<'a>>,
     pub command: Option<ArgValue<'a>>,
     pub args: Vec<ArgValue<'a>>,
@@ -168,6 +171,9 @@ pub struct OwnedArgs {
     pub heartbeat: Option<String>,
     pub stdin_timeout: Option<String>,
     pub stdin_passthrough: bool,
+    pub mem_limit: Option<String>,
+    pub cpu_time: Option<String>,
+    pub cpu_percent: Option<String>,
     pub duration: Option<String>,
     pub command: Option<String>,
     pub args: Vec<String>,
@@ -196,6 +202,9 @@ impl<'a> Args<'a> {
             heartbeat: self.heartbeat.map(|v| v.into_owned()),
             stdin_timeout: self.stdin_timeout.map(|v| v.into_owned()),
             stdin_passthrough: self.stdin_passthrough,
+            mem_limit: self.mem_limit.map(|v| v.into_owned()),
+            cpu_time: self.cpu_time.map(|v| v.into_owned()),
+            cpu_percent: self.cpu_percent.map(|v| v.into_owned()),
             duration: self.duration.map(|v| v.into_owned()),
             command: self.command.map(|v| v.into_owned()),
             args: self.args.into_iter().map(|v| v.into_owned()).collect(),
@@ -500,6 +509,42 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                 result.stdin_timeout = Some(ArgValue::Borrowed(&s[16..]));
             }
 
+            "--mem-limit" => {
+                i += 1;
+                result.mem_limit = Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                    ParseError {
+                        message: "--mem-limit requires a value".to_string(),
+                    }
+                })?));
+            }
+            s if s.starts_with("--mem-limit=") => {
+                result.mem_limit = Some(ArgValue::Borrowed(&s[12..]));
+            }
+
+            "--cpu-time" => {
+                i += 1;
+                result.cpu_time = Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                    ParseError {
+                        message: "--cpu-time requires a duration".to_string(),
+                    }
+                })?));
+            }
+            s if s.starts_with("--cpu-time=") => {
+                result.cpu_time = Some(ArgValue::Borrowed(&s[11..]));
+            }
+
+            "--cpu-percent" => {
+                i += 1;
+                result.cpu_percent = Some(ArgValue::Borrowed(args.get(i).ok_or_else(|| {
+                    ParseError {
+                        message: "--cpu-percent requires a value".to_string(),
+                    }
+                })?));
+            }
+            s if s.starts_with("--cpu-percent=") => {
+                result.cpu_percent = Some(ArgValue::Borrowed(&s[14..]));
+            }
+
             "--stdin-passthrough" => {
                 result.stdin_passthrough = true;
             }
@@ -750,6 +795,11 @@ Options:
       --json                      Output result as JSON (for scripting/CI)
   -h, --help                      Print help
   -V, --version                   Print version
+      --mem-limit <BYTES>         Soft memory limit enforced via polling (e.g., 512M, 2G)
+                                  Note: checked every 100ms; rapid spikes may escape detection
+      --cpu-time <DURATION>       Set RLIMIT_CPU (total CPU time) for the command
+      --cpu-percent <PCT>         Throttle CPU to PCT via SIGSTOP/SIGCONT
+                                  (100 = 1 core, 400 = 4 cores; low values may stutter)
 
 Exit status:
   124 if COMMAND times out, and --preserve-status is not specified

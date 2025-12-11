@@ -18,6 +18,8 @@ use alloc::vec::Vec;
 use core::ffi::c_char;
 use core::ptr;
 
+use crate::rlimit::{ResourceLimits, apply_limits};
+
 /*
  * FFI declarations for functions not in libc crate or needing special handling.
  * Most posix_spawn functions are available via libc::*.
@@ -398,6 +400,62 @@ pub fn spawn_command(
             EACCES | EPERM => SpawnError::PermissionDenied(command.into()),
             _ => SpawnError::Spawn(ret),
         });
+    }
+
+    Ok(RawChild { pid, exited: false })
+}
+
+/// Spawn a command using fork + exec, applying resource limits before exec.
+/// Falls back to exit codes 126/127 inside the child on exec failure.
+pub fn spawn_command_with_limits(
+    command: &str,
+    args: &[String],
+    use_process_group: bool,
+    limits: &ResourceLimits,
+) -> Result<RawChild, SpawnError> {
+    /* build argv: [command, args..., NULL] */
+    let cmd_cstr = CString::new(command).map_err(|_| SpawnError::InvalidArg)?;
+
+    let mut argv_cstrs: Vec<CString> = Vec::with_capacity(args.len() + 2);
+    argv_cstrs.push(cmd_cstr.clone());
+    for arg in args {
+        argv_cstrs.push(CString::new(arg.as_str()).map_err(|_| SpawnError::InvalidArg)?);
+    }
+
+    let mut argv_ptrs: Vec<*const c_char> = Vec::with_capacity(argv_cstrs.len() + 1);
+    for cstr in &argv_cstrs {
+        argv_ptrs.push(cstr.as_ptr());
+    }
+    argv_ptrs.push(ptr::null());
+
+    /* fork into parent and child */
+    // SAFETY: fork() is safe - creates child process. returns pid in parent, 0 in child.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(SpawnError::Spawn(errno()));
+    }
+
+    if pid == 0 {
+        /* child */
+        if use_process_group {
+            // SAFETY: setpgid(0,0) in child to create its own group.
+            unsafe { libc::setpgid(0, 0) };
+        }
+
+        /* apply resource limits before exec */
+        if !limits.is_empty() && apply_limits(limits).is_err() {
+            // SAFETY: _exit terminates child process immediately
+            unsafe { libc::_exit(125) };
+        }
+
+        // SAFETY: execvp with valid argv pointers. On failure, returns -1.
+        let ret = unsafe { libc::execvp(cmd_cstr.as_ptr(), argv_ptrs.as_ptr()) };
+        if ret < 0 {
+            let e = errno();
+            let code = if e == ENOENT { 127 } else { 126 };
+            // SAFETY: _exit terminates child process with error code
+            unsafe { libc::_exit(code) };
+        }
     }
 
     Ok(RawChild { pid, exited: false })

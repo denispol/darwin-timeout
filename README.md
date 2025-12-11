@@ -17,6 +17,8 @@ Plus features GNU doesn't have:
     timeout -c active 1h ./benchmark     # pause timer during sleep (GNU behavior)
     timeout --on-timeout 'cleanup.sh' 30s ./task  # pre-timeout hook
     timeout --retry 3 30s ./flaky-test   # retry on timeout
+    timeout --mem-limit 1G 1h ./build    # kill if memory exceeds 1GB
+    timeout --cpu-percent 50 1h ./batch  # throttle to 50% CPU
 
 **Coming from GNU coreutils?** darwin-timeout defaults to wall-clock time (survives sleep). Use `-c active` for GNU-like behavior where the timer pauses during sleep.
 
@@ -58,6 +60,7 @@ Legend: ▓ awake  ░ sleep  █ counting  · paused  ^ fire point
 |---------------------------|----------------|---------------|
 | Works during system sleep | ✓              | ✗             |
 | Selectable time mode      | ✓ (wall/active)| ✗ (active only)|
+| **Resource limits**       | ✓ (mem/CPU)    | ✗             |
 | JSON output               | ✓              | ✗             |
 | Retry on timeout          | ✓              | ✗             |
 | Stdin idle timeout        | ✓              | ✗             |
@@ -152,6 +155,22 @@ Use Cases
     # combine with --json for structured CI output
     timeout --heartbeat 30s --json 1h ./deploy.sh
 
+**Resource sandboxing**: Enforce memory and CPU limits on untrusted or runaway processes. No containers, no cgroups, no root—just process-level enforcement that actually works on macOS.
+
+    # Memory guard: kill if build exceeds 4GB (prevents OOM-induced system freeze)
+    timeout --mem-limit 4G 2h make -j8
+
+    # CPU throttle: limit background job to 50% of one core
+    timeout --cpu-percent 50 1h ./batch-process
+
+    # Multi-core cap: allow up to 4 cores (400%) for parallel builds
+    timeout --cpu-percent 400 --mem-limit 8G 1h cargo build --release -j8
+
+    # Full resource box: time + memory + CPU limits together
+    timeout --mem-limit 512M --cpu-percent 25 --cpu-time 5m 30m ./untrusted-script
+
+> **Why this matters:** macOS has no cgroups. `ulimit` memory limits don't work. Until now, there was no way to enforce resource limits on a single command without containers or third-party daemons. darwin-timeout brings Linux-style resource control to macOS, in 100KB.
+
 Options
 -------
 
@@ -181,6 +200,9 @@ Options
     --retry-backoff Nx       multiply delay by N each retry (e.g., 2x)
     -S, --stdin-timeout T    kill command if stdin is idle for T (consumes stdin; for prompt detection)
     --stdin-passthrough      non-consuming stdin idle detection (pair with -S)
+    --mem-limit SIZE         kill if memory exceeds SIZE (e.g., 512M, 2G, 1T)
+    --cpu-time T             hard CPU time limit via RLIMIT_CPU (e.g., 30s, 5m)
+    --cpu-percent PCT        throttle CPU to PCT% via SIGSTOP/SIGCONT (e.g., 50, 200)
 
 **Duration format:** number with optional suffix `ms` (milliseconds), `us`/`µs` (microseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Fractional values supported: `0.5s`, `1.5ms`, `100us`.
 
@@ -206,6 +228,38 @@ Time Modes
     timeout -c active 1h ./benchmark     # pauses during sleep, like GNU timeout
 
 Under the hood: `wall` uses `mach_continuous_time`, `active` uses `CLOCK_MONOTONIC_RAW`.
+
+Resource Limits
+---------------
+
+Enforce memory and CPU constraints without containers or root privileges. Three complementary mechanisms:
+
+**Memory limit** (`--mem-limit`): Kill process if physical memory exceeds threshold.
+
+    timeout --mem-limit 2G 1h ./memory-hungry-app
+    timeout --mem-limit 512M --kill-after 5s 30m ./leak-prone-service
+
+Supports: `K`/`KB`, `M`/`MB`, `G`/`GB`, `T`/`TB` (binary units, case-insensitive).
+
+**CPU time limit** (`--cpu-time`): Hard limit on total CPU seconds consumed.
+
+    timeout --cpu-time 5m 1h ./compute-job    # max 5 minutes of CPU time
+
+Kernel-enforced via RLIMIT_CPU. Process receives SIGXCPU then SIGKILL.
+
+**CPU throttle** (`--cpu-percent`): Actively limit CPU usage percentage.
+
+    timeout --cpu-percent 50 1h ./background-task    # 50% of one core
+    timeout --cpu-percent 200 1h ./parallel-job      # max 2 cores
+    timeout --cpu-percent 800 1h make -j8            # max 8 cores
+
+Uses SIGSTOP/SIGCONT with integral control for precise convergence to target percentage. Multi-core aware: 100 = 1 core, 400 = 4 cores.
+
+**Combining limits**: All three can be used together.
+
+    timeout --mem-limit 1G --cpu-time 10m --cpu-percent 50 1h ./untrusted
+
+See [docs/resource-limits.md](docs/resource-limits.md) for implementation details, algorithm explanation, and advanced use cases.
 
 JSON Output
 -----------
