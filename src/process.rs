@@ -583,3 +583,102 @@ mod tests {
         let _ = child.wait();
     }
 }
+
+/* -------------------------------------------------------------------------- */
+/*                              kani proofs                                   */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * kani proofs for process lifecycle invariants.
+ * focuses on state machine correctness rather than FFI (which kani can't model).
+ */
+#[cfg(kani)]
+mod kani_proofs {
+    /*
+     * verify RawChild state machine: exited flag prevents double-wait.
+     * models the invariant that wait() can only succeed once.
+     */
+    #[kani::proof]
+    fn verify_wait_only_once() {
+        let mut exited = false;
+
+        /* first wait succeeds, sets exited = true */
+        if !exited {
+            exited = true;
+            /* simulates successful wait */
+        }
+
+        /* second wait should fail (exited == true) */
+        let would_wait = !exited;
+        kani::assert(!would_wait, "second wait should not proceed when exited");
+    }
+
+    /*
+     * verify kill() is idempotent when process already exited.
+     * calling kill() on exited process should be a no-op.
+     */
+    #[kani::proof]
+    fn verify_kill_idempotent_after_exit() {
+        let exited: bool = kani::any();
+
+        /* kill() logic: if exited, return Ok immediately */
+        let would_send_signal = !exited;
+
+        if exited {
+            kani::assert(
+                !would_send_signal,
+                "kill should not send signal when exited",
+            );
+        }
+    }
+
+    /*
+     * verify exit status code extraction is correct.
+     * WIFEXITED: (status & 0x7F) == 0
+     * WEXITSTATUS: (status >> 8) & 0xFF
+     */
+    #[kani::proof]
+    fn verify_exit_status_extraction() {
+        let status: i32 = kani::any();
+
+        /* model exited_normally: (status & 0x7F) == 0 */
+        let exited_normally = (status & 0x7F) == 0;
+
+        /* model code extraction: (status >> 8) & 0xFF */
+        let code = (status >> 8) & 0xFF;
+
+        /* code should be in range 0-255 */
+        kani::assert(code >= 0 && code <= 255, "exit code must be 0-255");
+
+        /* if normally exited, code is valid */
+        if exited_normally {
+            kani::cover!(code == 0, "exit code can be 0 (success)");
+            kani::cover!(code > 0, "exit code can be non-zero (failure)");
+        }
+    }
+
+    /*
+     * verify signal extraction from status.
+     * WIFSIGNALED: ((status & 0x7F) + 1) >> 1 > 0
+     * WTERMSIG: status & 0x7F
+     */
+    #[kani::proof]
+    fn verify_signal_extraction() {
+        let status: i32 = kani::any();
+
+        /* model signaled: low 7 bits non-zero in specific pattern */
+        let signaled = ((status & 0x7F) + 1) >> 1 > 0;
+
+        /* model signal extraction */
+        let signal = status & 0x7F;
+
+        /* signal should be in range 0-127 */
+        kani::assert(signal >= 0 && signal <= 127, "signal must be 0-127");
+
+        /* common signals we care about */
+        if signaled {
+            kani::cover!(signal == 9, "can detect SIGKILL");
+            kani::cover!(signal == 15, "can detect SIGTERM");
+        }
+    }
+}

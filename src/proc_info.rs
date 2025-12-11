@@ -153,3 +153,82 @@ mod tests {
         assert!(get_process_stats(-1).is_err());
     }
 }
+
+/* -------------------------------------------------------------------------- */
+/*                              kani proofs                                   */
+/* -------------------------------------------------------------------------- */
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /*
+     * verify AlignedBuffer has at least 8-byte alignment for u64 field access.
+     * misaligned writes from kernel could cause SIGBUS on strict ARM64.
+     *
+     * this is a compile-time property but kani confirms the repr works.
+     */
+    #[kani::proof]
+    fn verify_aligned_buffer_8byte() {
+        let align = core::mem::align_of::<AlignedBuffer>();
+        kani::assert(
+            align >= 8,
+            "AlignedBuffer must have at least 8-byte alignment",
+        );
+    }
+
+    /*
+     * verify field offsets are within buffer bounds.
+     * protects against typos in offset constants causing OOB reads.
+     */
+    #[kani::proof]
+    fn verify_field_offsets_in_bounds() {
+        /* all offsets must allow reading a u64 (8 bytes) within buffer */
+        kani::assert(
+            OFFSET_USER_TIME + 8 <= RUSAGE_BUFFER_SIZE,
+            "OFFSET_USER_TIME must be in bounds",
+        );
+        kani::assert(
+            OFFSET_SYSTEM_TIME + 8 <= RUSAGE_BUFFER_SIZE,
+            "OFFSET_SYSTEM_TIME must be in bounds",
+        );
+        kani::assert(
+            OFFSET_PHYS_FOOTPRINT + 8 <= RUSAGE_BUFFER_SIZE,
+            "OFFSET_PHYS_FOOTPRINT must be in bounds",
+        );
+    }
+
+    /*
+     * verify read_u64 never panics on valid offsets.
+     * the try_into().unwrap_or([0; 8]) should handle edge cases.
+     */
+    #[kani::proof]
+    fn verify_read_u64_no_panic() {
+        let buf = [0u8; RUSAGE_BUFFER_SIZE];
+        let offset: usize = kani::any();
+
+        /* only test valid offsets that allow reading 8 bytes */
+        kani::assume(offset + 8 <= RUSAGE_BUFFER_SIZE);
+
+        /* read_u64 should not panic */
+        let _result = read_u64(&buf, offset);
+    }
+
+    /*
+     * verify buffer size is sufficient for rusage_info_v4.
+     * v4 has 16 bytes uuid + 36 u64 fields = 16 + 288 = 304 bytes.
+     * we use 512 for future-proofing.
+     */
+    #[kani::proof]
+    fn verify_buffer_size_sufficient() {
+        const RUSAGE_INFO_V4_SIZE: usize = 16 + 36 * 8; /* 304 bytes */
+        kani::assert(
+            RUSAGE_BUFFER_SIZE >= RUSAGE_INFO_V4_SIZE,
+            "buffer must fit rusage_info_v4",
+        );
+        kani::assert(
+            RUSAGE_BUFFER_SIZE >= 512,
+            "buffer should be 512 for future versions",
+        );
+    }
+}

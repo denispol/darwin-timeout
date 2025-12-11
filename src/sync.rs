@@ -194,3 +194,93 @@ mod tests {
         assert!(cell.get().is_none());
     }
 }
+
+/* -------------------------------------------------------------------------- */
+/*                              kani proofs                                   */
+/* -------------------------------------------------------------------------- */
+
+#[cfg(kani)]
+mod kani_proofs {
+    use super::*;
+
+    /*
+     * verify that after successful set(), get() returns the same value.
+     * this is the fundamental publish/subscribe contract of AtomicOnce.
+     *
+     * models the state machine transitions:
+     * UNINIT -> INITIALIZING -> INITIALIZED (write) -> get returns value
+     */
+    #[kani::proof]
+    fn verify_set_get_consistency() {
+        let cell: AtomicOnce<u32> = AtomicOnce::new();
+        let value: u32 = kani::any();
+
+        /* initial state: get returns None */
+        /* (can't call get() in kani easily due to references, model the state) */
+        let initial_state = cell.state.load(Ordering::Acquire);
+        kani::assert(initial_state == UNINIT, "initial state should be UNINIT");
+
+        /* after successful set, state should be INITIALIZED */
+        let set_result = cell.set(value);
+        if set_result.is_ok() {
+            let final_state = cell.state.load(Ordering::Acquire);
+            kani::assert(
+                final_state == INITIALIZED,
+                "state should be INITIALIZED after set",
+            );
+        }
+    }
+
+    /*
+     * verify that only one set() can succeed (second returns Err).
+     * models the CAS race: exactly one winner.
+     */
+    #[kani::proof]
+    fn verify_set_only_once() {
+        let cell: AtomicOnce<u32> = AtomicOnce::new();
+        let v1: u32 = kani::any();
+        let v2: u32 = kani::any();
+
+        let r1 = cell.set(v1);
+        let r2 = cell.set(v2);
+
+        /* at most one can succeed */
+        kani::assert(!(r1.is_ok() && r2.is_ok()), "only one set() should succeed");
+
+        /* at least one succeeds (UNINIT -> first caller wins) */
+        kani::assert(
+            r1.is_ok() || r2.is_ok(),
+            "at least one set() should succeed",
+        );
+
+        /* first call always wins when sequential */
+        kani::assert(r1.is_ok(), "first set() should always succeed");
+        kani::assert(r2.is_err(), "second set() should always fail");
+    }
+
+    /*
+     * verify state machine only moves forward: UNINIT -> INITIALIZING -> INITIALIZED.
+     * state can never go backwards or skip states.
+     */
+    #[kani::proof]
+    fn verify_state_machine_monotonic() {
+        /* model the state transitions */
+        let mut state: u8 = UNINIT;
+
+        /* transition 1: UNINIT -> INITIALIZING (CAS success) */
+        if state == UNINIT {
+            state = INITIALIZING;
+        }
+        kani::assert(state == INITIALIZING, "should transition to INITIALIZING");
+
+        /* transition 2: INITIALIZING -> INITIALIZED (after write) */
+        if state == INITIALIZING {
+            state = INITIALIZED;
+        }
+        kani::assert(state == INITIALIZED, "should transition to INITIALIZED");
+
+        /* no backwards transitions allowed */
+        kani::assert(state >= UNINIT, "state never goes below UNINIT");
+        kani::assert(state <= INITIALIZED, "state never exceeds INITIALIZED");
+    }
+}

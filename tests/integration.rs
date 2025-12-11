@@ -601,6 +601,27 @@ fn test_version() {
         .stdout(predicate::str::contains("timeout"));
 }
 
+#[test]
+fn test_version_short_flag_must_be_standalone() {
+    /* regression test for fuzzer-discovered bug: -V in a cluster like -V--i2
+     * should not call exit(0) - it should error about -V not being a valid cluster member */
+    timeout_cmd()
+        .arg("-V--i2")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("-V must be used alone"));
+}
+
+#[test]
+fn test_help_short_flag_must_be_standalone() {
+    /* -h must also be standalone, not in a cluster like -h--i2 */
+    timeout_cmd()
+        .arg("-h--i2")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("-h must be used alone"));
+}
+
 /* =========================================================================
  * PROCESS GROUP HANDLING - Kill children too
  * ========================================================================= */

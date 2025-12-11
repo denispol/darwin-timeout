@@ -41,6 +41,13 @@ opt-level = 1
 lto = true
 opt-level = 3
 
+# Fuzzing profile - optimizations with debug assertions
+[profile.fuzz]
+inherits = "release"
+opt-level = 3
+debug-assertions = true
+overflow-checks = true
+
 [[bin]]
 name = "timeout"
 path = "src/main.rs"
@@ -55,6 +62,8 @@ unsafe_op_in_unsafe_fn = "deny"
 dangling_pointers_from_locals = "deny"
 # Uplifted in 1.88: prevents null pointer UB in FFI calls expecting non-null args.
 invalid_null_arguments = "deny"
+# Allow kani cfg for formal verification proofs
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [lints.clippy]
 # Require SAFETY comments on unsafe blocks - enforces documentation of invariants.

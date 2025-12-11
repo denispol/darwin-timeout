@@ -1,0 +1,76 @@
+# Verification workflow - cargo-fuzz and kani
+#
+# Runs on PRs touching src/*.rs to verify:
+# - fuzz targets compile (cargo fuzz check)
+# - kani proofs pass (cargo kani)
+# - miri detects no UB in non-FFI tests (cargo miri test)
+
+name: Verification
+
+on:
+  pull_request:
+    paths:
+      - "src/**/*.rs"
+      - "fuzz/**/*.rs"
+      - "Cargo.toml"
+      - ".github/workflows/verify.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**/*.rs"
+      - "fuzz/**/*.rs"
+      - "Cargo.toml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz-check:
+    name: Fuzz Targets Compile
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly (for cargo-fuzz)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Check fuzz targets compile
+        run: |
+          cd fuzz
+          cargo fuzz check
+
+  kani:
+    name: Kani Proofs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Kani
+        uses: model-checking/kani-github-action@v1
+        with:
+          kani-version: latest
+
+      - name: Run Kani proofs
+        run: cargo kani --tests
+
+  miri:
+    name: Miri UB Detection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly with miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Setup Miri
+        run: cargo miri setup
+
+      - name: Run Miri tests
+        # Run non-FFI tests under Miri
+        # FFI tests are skipped via #[cfg_attr(miri, ignore)]
+        run: cargo miri test --lib
