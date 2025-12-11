@@ -295,6 +295,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_throttle_state_new_self() {
         /* we should be able to create throttle state for ourselves */
         // SAFETY: getpid() always succeeds
@@ -311,6 +312,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_throttle_state_invalid_pid() {
         /* invalid pid should fail */
         let result = CpuThrottleState::new(-1, 1_000_000_000);
@@ -340,6 +342,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_throttle_state_has_start_fields() {
         /* verify integral control fields are initialized */
         // SAFETY: getpid() always succeeds

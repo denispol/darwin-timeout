@@ -109,6 +109,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_get_process_memory_self() {
         /* we should be able to get our own memory usage */
         // SAFETY: getpid() always succeeds
@@ -120,6 +121,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_get_process_cpu_time_self() {
         /* we should be able to get our own cpu time */
         // SAFETY: getpid() always succeeds
@@ -131,6 +133,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_get_process_stats_self() {
         // SAFETY: getpid() always succeeds
         let pid = unsafe { libc::getpid() };
@@ -142,6 +145,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_invalid_pid() {
         /* pid -1 should fail */
         assert!(get_process_memory(-1).is_none());
