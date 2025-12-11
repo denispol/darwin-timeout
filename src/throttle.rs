@@ -202,12 +202,11 @@ mod tests {
         assert!(cores.is_some(), "should be able to get CPU core count");
         let cores = cores.unwrap();
 
-        /* sanity: modern macs have at least 4 cores, at most ~128 */
-        assert!(cores >= 4, "expected at least 4 cores, got {}", cores);
+        /* sanity: any machine should have at least 1 core, at most ~128 */
+        assert!(cores >= 1, "expected at least 1 core, got {}", cores);
         assert!(cores <= 128, "expected at most 128 cores, got {}", cores);
 
-        /* for M4 Pro specifically: 14 cores */
-        /* this test documents expected behavior on test machine */
+        /* log actual count for diagnostics (CI runners may have 2-4, M4 Pro has 14) */
         eprintln!("CPU cores detected: {}", cores);
     }
 
