@@ -26,6 +26,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Principle of least privilege - only read access needed
+permissions:
+  contents: read
+
 jobs:
   # Detect which files changed to determine which jobs to run
   changes:

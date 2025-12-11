@@ -16,6 +16,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Principle of least privilege - only read access needed
+permissions:
+  contents: read
+
 jobs:
   # Lint first - fast fail before expensive test matrix
   lint:

@@ -80,17 +80,16 @@ CI automatically triggers extra verification based on which files you change. **
 **Always runs (every PR):**
 - `cargo fmt --check`
 - `cargo clippy -- -D warnings`
-- `cargo audit` (security)
 - `cargo test --lib` (152 unit tests)
 - `cargo test --test integration` (167 tests)
 - `cargo test --test proptest` (30 properties)
 - Binary size check (≤150KB)
 - Symbol count check (≤100)
+- Miri UB detection
 
 **Path-triggered (automatic):**
 - **Kani proofs**: When safety-critical files change (sync, process, throttle, proc_info, time_math)
 - **Fuzz execution**: When parsing files change (duration, signal, args, rlimit)
-- **Miri UB detection**: Always runs on any Rust file change
 
 > ⚠️ **Adding new modules**: If you add a new module with `unsafe` code or state machines, add it to `.github/workflows/verify.yml` kani paths. If you add a new parser, add it to the fuzz paths.
 
