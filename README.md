@@ -80,12 +80,12 @@ Legend: ▓ awake  ░ sleep  █ counting  · paused  ^ fire point
 Quality & Testing
 -----------------
 
-darwin-timeout uses a **five-layer verification approach** rarely seen in CLI tools:
+darwin-timeout uses a **five-layer verification approach**:
 
 | Method | Coverage | What It Catches |
 |--------|----------|-----------------|
-| **Unit tests** | 152 tests | Logic errors, edge cases |
-| **Integration tests** | 167 tests | Real process behavior, signals, I/O |
+| **Unit tests** | 154 tests | Logic errors, edge cases |
+| **Integration tests** | 179 tests | Real process behavior, signals, I/O |
 | **Property-based (proptest)** | 30 properties, ~7500 cases | Input invariants, mathematical relationships |
 | **Fuzzing (cargo-fuzz)** | 4 targets, ~70M executions | Crashes, panics, hangs from malformed input |
 | **Formal verification (kani)** | 19 proofs | Mathematical proof of memory safety, no overflows |

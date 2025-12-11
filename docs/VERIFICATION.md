@@ -83,7 +83,7 @@ Which methods cover which modules:
 | duration.rs | ✓ | | ✓ | ✓ | |
 | signal.rs | ✓ | | ✓ | ✓ | |
 | args.rs | ✓ | ✓ | | ✓ | |
-| rlimit.rs | ✓ | | ✓ | ✓ | |
+| rlimit.rs | ✓ | ✓ | ✓ | ✓ | |
 | process.rs | ✓ | ✓ | | | ✓ |
 | runner.rs | ✓ | ✓ | | | |
 | sync.rs | ✓ | | | | ✓ |
@@ -91,6 +91,8 @@ Which methods cover which modules:
 | proc_info.rs | ✓ | | | | ✓ |
 | time_math.rs | ✓ | | | | ✓ |
 | wait.rs | ✓ | ✓ | | | |
+| error.rs | ✓ | | | | |
+| io.rs | ✓ | | | | |
 
 ---
 
@@ -303,8 +305,8 @@ Mathematical proofs that properties hold for ALL inputs (within bounds).
 ### Installation
 
 ```bash
-cargo install kani-verifier
-kani setup
+cargo install --locked kani-verifier
+cargo kani setup
 ```
 
 ### Running Proofs
@@ -389,12 +391,12 @@ Required for:
 
 ## Verification Results
 
-### Current Status (2025-12-11)
+### Current Status (2025-12-12)
 
 | Method | Count | Result | Executions |
 |--------|-------|--------|------------|
-| Unit tests | ~150 | ✓ passing | - |
-| Integration | ~30 | ✓ passing | - |
+| Unit tests | 154 | ✓ passing | - |
+| Integration | 179 | ✓ passing | - |
 | Proptest | 30 | ✓ passing | ~7500/run |
 | cargo-fuzz | 4 targets | ✓ 0 crashes | ~70M total |
 | Kani | 19 proofs | ✓ 19/19 | - |
@@ -404,6 +406,8 @@ Required for:
 | Date | Method | Target | Bug | Fix |
 |------|--------|--------|-----|-----|
 | 2025-12-11 | cargo-fuzz | parse_args | -V/-h accepted in clusters | args.rs:575-600 |
+| 2025-12-11 | proptest | parse_duration | bare "." accepted | duration.rs |
+| 2025-12-11 | proptest | parse_mem_limit | bare suffix "G" accepted | rlimit.rs |
 
 ### Coverage Gaps
 
@@ -448,7 +452,7 @@ jobs:
     if: contains(github.event.pull_request.labels.*.name, 'needs-kani')
     steps:
       - uses: actions/checkout@v4
-      - run: cargo install kani-verifier && kani setup
+      - run: cargo install --locked kani-verifier && cargo kani setup
       - run: cargo kani
 ```
 
@@ -473,8 +477,8 @@ cargo +nightly fuzz run target_name
 
 **"kani not found"**
 ```bash
-cargo install kani-verifier
-kani setup
+cargo install --locked kani-verifier
+cargo kani setup
 ```
 
 **Proof times out**

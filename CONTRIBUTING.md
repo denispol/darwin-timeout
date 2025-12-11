@@ -36,8 +36,8 @@ rustup install stable nightly
 cargo install cargo-fuzz
 
 # kani (optional, for formal verification)
-cargo install kani-verifier
-kani setup
+cargo install --locked kani-verifier
+cargo kani setup
 ```
 
 ## Development Workflow
@@ -79,8 +79,8 @@ CI automatically triggers extra verification based on which files you change. **
 **Always runs (every PR):**
 - `cargo fmt --check`
 - `cargo clippy -- -D warnings`
-- `cargo test --lib` (152 unit tests)
-- `cargo test --test integration` (167 tests)
+- `cargo test --lib` (154 unit tests)
+- `cargo test --test integration` (179 tests)
 - `cargo test --test proptest` (30 properties)
 - Binary size check (≤150KB)
 - Symbol count check (≤100)
