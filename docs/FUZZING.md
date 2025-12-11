@@ -1,6 +1,6 @@
 # Fuzzing darwin-timeout
 
-comprehensive fuzzing setup using cargo-fuzz (libFuzzer) to catch bugs in input parsing and state machines.
+comprehensive verification using cargo-fuzz (libFuzzer), kani (formal verification), and proptest (property-based testing).
 
 ## Quick Start
 
@@ -9,7 +9,6 @@ comprehensive fuzzing setup using cargo-fuzz (libFuzzer) to catch bugs in input 
 cargo install cargo-fuzz
 
 # run a specific fuzz target for 60 seconds
-cd fuzz
 cargo +nightly fuzz run parse_duration -- -max_total_time=60
 
 # run all targets
@@ -19,7 +18,24 @@ cargo +nightly fuzz run parse_args -- -max_total_time=60
 cargo +nightly fuzz run parse_mem_limit -- -max_total_time=60
 ```
 
-## Targets
+## Verification Methods
+
+### cargo-fuzz (Coverage-Guided Fuzzing)
+generates random inputs to explore code paths and find crashes.
+- throughput: ~500k exec/sec on M-series mac
+- finds: crashes, panics, assertion failures, hangs
+
+### kani (Formal Verification)
+mathematically proves properties about code.
+- proves: absence of bugs for ALL possible inputs (within bounds)
+- finds: integer overflow, buffer bounds, state machine errors
+
+### proptest (Property-Based Testing)
+tests properties that should hold for generated inputs.
+- finds: logic errors, edge cases, invariant violations
+- easier to write than fuzzing harnesses
+
+## Fuzz Targets
 
 ### parse_duration
 fuzzes duration string parsing ("30s", "1.5m", etc) - validates no crashes on malformed inputs, unicode, overflow attempts.
@@ -176,3 +192,82 @@ RUST_BACKTRACE=1 cargo +nightly fuzz run target_name
 **Regression Tests**: `test_version_short_flag_must_be_standalone`, `test_help_short_flag_must_be_standalone` in `tests/integration.rs`
 
 **Artifacts**: Saved locally, not committed.
+
+## Kani Formal Verification
+
+19 proofs across 5 modules verify critical invariants mathematically.
+
+### Installation
+
+```bash
+cargo install kani-verifier
+kani setup
+```
+
+### Running Proofs
+
+```bash
+# run all 19 proofs (~2-3 minutes)
+cargo kani
+
+# run specific proof
+cargo kani --harness verify_no_sigcont_after_mark_exited
+```
+
+### Proof Coverage
+
+| Module | Proofs | Properties |
+|--------|--------|------------|
+| sync.rs | 3 | AtomicOnce initialization, state machine |
+| proc_info.rs | 4 | Buffer alignment, field offsets, bounds |
+| process.rs | 4 | Wait-only-once, kill idempotence, exit codes |
+| throttle.rs | 3 | No SIGCONT after exit, suspend/resume |
+| time_math.rs | 5 | Overflow handling, deadline calculations |
+
+### Results (2025-12-11)
+
+All 19 proofs pass. Two fixes applied:
+1. `proc_info.rs`: saturating_sub to avoid overflow before kani::assume
+2. `sync.rs`: simplified atomic test (kani explores non-sequential paths)
+
+## Proptest Property Testing
+
+30 property tests in `tests/proptest.rs` validate parsing invariants.
+
+### Running Tests
+
+```bash
+cargo test --test proptest
+```
+
+### Properties Tested
+
+**Duration Parsing**:
+- valid units parse correctly (s, m, h, d, ms, us)
+- ordering preserved (if a > b, parse(a) >= parse(b))
+- fractional equivalence (1.5s = 1500ms)
+- whitespace trimmed, case insensitive
+- negative values always error
+
+**Signal Parsing**:
+- all enum signals parse and roundtrip
+- case insensitive (TERM = term = Term)
+- SIG prefix optional (SIGTERM = TERM)
+- invalid numbers (0, 32+) error
+
+**Memory Limits**:
+- valid units parse correctly (K, M, G, T)
+- case insensitive suffixes
+- overflow detected
+
+### Results (2025-12-11)
+
+30/30 tests pass. ~7500 generated test cases per run.
+
+## Verification Summary
+
+| Method | Tests | Focus | Results |
+|--------|-------|-------|---------|
+| cargo-fuzz | 4 targets | crash discovery | ~70M exec, 1 bug found |
+| kani | 19 proofs | correctness | 19/19 passing |
+| proptest | 30 properties | invariants | 30/30 passing |

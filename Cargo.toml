@@ -13,11 +13,12 @@ categories = ["command-line-utilities"]
 [dependencies]
 # Direct libc for signal handling, process groups, kqueue
 # default-features = false for no_std compatibility
-libc = { version = "0.2.177", default-features = false }
+libc = { version = "0.2.178", default-features = false }
 
 [dev-dependencies]
-assert_cmd = "2.0.17"
+assert_cmd = "2.1.1"
 predicates = "3.1.3"
+proptest = "1.9.0"
 
 [profile.release]
 opt-level = "z"         # size-optimized (perf impact minimal for this CLI)
