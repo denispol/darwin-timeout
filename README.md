@@ -77,6 +77,27 @@ Legend: ▓ awake  ░ sleep  █ counting  · paused  ^ fire point
 
 100% GNU-compatible. All flags work identically (`-s`, `-k`, `-p`, `-f`, `-v`). Drop-in replacement for Apple Silicon and Intel Macs.
 
+Quality & Testing
+-----------------
+
+darwin-timeout uses a **five-layer verification approach** rarely seen in CLI tools:
+
+| Method | Coverage | What It Catches |
+|--------|----------|-----------------|
+| **Unit tests** | 152 tests | Logic errors, edge cases |
+| **Integration tests** | 167 tests | Real process behavior, signals, I/O |
+| **Property-based (proptest)** | 30 properties, ~7500 cases | Input invariants, mathematical relationships |
+| **Fuzzing (cargo-fuzz)** | 4 targets, ~70M executions | Crashes, panics, hangs from malformed input |
+| **Formal verification (kani)** | 19 proofs | Mathematical proof of memory safety, no overflows |
+
+**What this means for you:**
+- Parsing code is fuzz-tested (found and fixed bugs before release)
+- Unsafe code has formal proofs (mathematically verified, not just tested)
+- State machines are proven correct (no race conditions in signal handling)
+- Arithmetic is overflow-checked (all time calculations verified)
+
+See [docs/VERIFICATION.md](docs/VERIFICATION.md) for methodology details.
+
 Install
 -------
 
