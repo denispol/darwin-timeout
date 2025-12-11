@@ -4,6 +4,13 @@
 # - kani: safety-critical files (sync, process, throttle, proc_info, time_math)
 # - fuzz: parsing files (duration, signal, args, rlimit)
 #
+# Job dependency graph (minimizes resource waste):
+#
+#   changes (ubuntu, ~5s)
+#     ├─> kani (macos, ~3min) - only if safety files changed
+#     ├─> fuzz (macos, ~5min) - only if parser files changed
+#     └─> fuzz-check (macos, ~30s) - only if fuzz DIDN'T run
+#
 # Miri runs in ci.yml (always, on macOS for darwin-specific tests)
 # See CONTRIBUTING.md "CI Auto-Verification Rules" for the full mapping.
 
@@ -107,9 +114,12 @@ jobs:
       - name: Fuzz parse_mem_limit
         run: cargo +nightly fuzz run parse_mem_limit -- -max_total_time=60
 
-  # Fuzz compile check: always verify fuzz targets compile
+  # Fuzz compile check: verify fuzz targets compile when fuzz job doesn't run.
+  # Skipped when fuzz runs (redundant - fuzz already compiles targets).
   fuzz-check:
     name: Fuzz Targets Compile
+    needs: changes
+    if: ${{ needs.changes.outputs.fuzz != 'true' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

@@ -2,6 +2,14 @@
 #
 # Fast feedback on every push/PR: lint first (fast fail), then test.
 # See CONTRIBUTING.md "CI Auto-Verification Rules" for the full test matrix.
+#
+# Job dependency graph (fast-fail pattern):
+#
+#   lint (macos, ~20s) - fmt + clippy
+#     ├─> test (macos, ~1min) - unit + integration + proptest + binary checks
+#     └─> miri (macos, ~1min) - UB detection in unsafe code
+#
+# Expensive verification (kani, fuzz) runs in verify.yml based on changed files.
 
 name: CI
 
