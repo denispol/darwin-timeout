@@ -75,7 +75,6 @@ CI automatically triggers extra verification based on which files you change. **
 | `src/args.rs` | fuzz |
 | `src/rlimit.rs` | fuzz |
 | `fuzz/**/*.rs` | fuzz |
-| Any `src/*.rs` | miri, fuzz-check |
 
 **Always runs (every PR):**
 - `cargo fmt --check`
@@ -86,10 +85,12 @@ CI automatically triggers extra verification based on which files you change. **
 - Binary size check (≤150KB)
 - Symbol count check (≤100)
 - Miri UB detection
+- Fuzz compile check (only when fuzz job doesn't run - ensures fuzz targets still compile)
 
 **Path-triggered (automatic):**
 - **Kani proofs**: When safety-critical files change (sync, process, throttle, proc_info, time_math)
 - **Fuzz execution**: When parsing files change (duration, signal, args, rlimit)
+- **Fuzz compile check**: Skipped when fuzz runs (redundant since fuzz already compiles targets)
 
 > ⚠️ **Adding new modules**: If you add a new module with `unsafe` code or state machines, add it to `.github/workflows/verify.yml` kani paths. If you add a new parser, add it to the fuzz paths.
 
