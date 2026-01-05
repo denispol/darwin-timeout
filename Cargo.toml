@@ -7,8 +7,26 @@ authors = ["denispol"]
 description = "Run a command with a time limit (GNU timeout clone for Darwin/Apple platforms)"
 license = "MIT"
 repository = "https://github.com/denispol/darwin-timeout"
+readme = "README.md"
+documentation = "https://docs.rs/darwin-timeout"
 keywords = ["cli", "timeout", "process", "macos", "darwin"]
-categories = ["command-line-utilities"]
+categories = ["command-line-utilities", "os::macos-apis"]
+
+# publish allowlist - keep crates.io package small and deterministic
+include = [
+	"Cargo.toml",
+	"README.md",
+	"LICENSE",
+	"build.rs",
+	"src/**",
+	"tests/**",
+	"completions/**",
+	"docs/*.md",
+]
+
+[lib]
+name = "darwin_timeout"
+path = "src/lib.rs"
 
 [dependencies]
 # Direct libc for signal handling, process groups, kqueue
@@ -52,6 +70,10 @@ overflow-checks = true
 [[bin]]
 name = "timeout"
 path = "src/main.rs"
+
+[package.metadata.docs.rs]
+# docs.rs builds on linux by default; force building docs for macOS targets.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
 
 [features]
 default = []

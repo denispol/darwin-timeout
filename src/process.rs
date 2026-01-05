@@ -154,6 +154,7 @@ pub struct RawChild {
 
 /// Exit status from a process
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct RawExitStatus {
     status: i32,
 }
@@ -220,6 +221,7 @@ impl RawExitStatus {
 
 /// Error from process operations
 #[cfg_attr(test, derive(Debug))]
+#[non_exhaustive]
 pub enum SpawnError {
     /// Command not found in PATH
     NotFound(String),

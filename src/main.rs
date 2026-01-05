@@ -416,6 +416,7 @@ fn print_json_output(
             let reason_str = match reason {
                 darwin_timeout::runner::TimeoutReason::WallClock => "wall_clock",
                 darwin_timeout::runner::TimeoutReason::StdinIdle => "stdin_idle",
+                _ => "unknown", /* future-proof for #[non_exhaustive] */
             };
 
             /* Build the JSON incrementally */
@@ -513,6 +514,19 @@ fn print_json_output(
                 elapsed_ms
             );
             append_rusage(&mut json, rusage.as_ref());
+            append_attempts(&mut json, attempts, retry_count);
+            append_limits(&mut json, limits, cpu_throttle);
+            json.push('}');
+            println!("{}", json);
+        }
+        _ => {
+            /* future-proof for #[non_exhaustive] - unknown variant */
+            let mut json = String::with_capacity(128);
+            let _ = write!(
+                json,
+                r#"{{"schema_version":{},"status":"unknown","exit_code":{},"elapsed_ms":{}"#,
+                SCHEMA_VERSION, exit_code, elapsed_ms
+            );
             append_attempts(&mut json, attempts, retry_count);
             append_limits(&mut json, limits, cpu_throttle);
             json.push('}');

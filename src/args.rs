@@ -101,6 +101,7 @@ impl Default for ArgValue<'_> {
 
 /// Time confinement mode - what clock to use for timeout measurement
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Confine {
     /// Wall clock time (includes system sleep) - default, uses mach_continuous_time
     #[default]

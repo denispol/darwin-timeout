@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing! This guide covers the development workflow and verification requirements.
 
+darwin-timeout is both a **CLI tool** and a **Rust library**. The same codebase powers both—`src/main.rs` is the CLI entry point, `src/lib.rs` exposes the public library API.
+
 ## Quick Start
 
 ```bash
@@ -10,11 +12,14 @@ git clone https://github.com/denispol/darwin-timeout.git
 cd darwin-timeout
 cargo build --release
 
-# run tests
+# run all tests (unit, integration, library API)
 cargo test
 
 # check binary size (must be ≤150KB)
 ls -la target/release/timeout
+
+# test library API specifically
+cargo test --test library_api
 ```
 
 ## Prerequisites
@@ -81,6 +86,7 @@ CI automatically triggers extra verification based on which files you change. **
 - `cargo clippy -- -D warnings`
 - `cargo test --lib` (154 unit tests)
 - `cargo test --test integration` (179 tests)
+- `cargo test --test library_api` (10 tests)
 - `cargo test --test proptest` (30 properties)
 - Binary size check (≤150KB)
 - Symbol count check (≤100)
@@ -122,15 +128,16 @@ CI automatically triggers extra verification based on which files you change. **
 
 ### What Tests to Add
 
-| Change Type | Unit | Integration | Proptest | Fuzz | Kani |
-|-------------|:----:|:-----------:|:--------:|:----:|:----:|
-| New parsing function | ✓ | | ✓ | ✓ | |
-| Process/signal handling | ✓ | ✓ | | | maybe |
-| Unsafe blocks | ✓ | | | | ✓ |
-| State machines | ✓ | ✓ | | | ✓ |
-| Arithmetic operations | ✓ | | | | ✓ |
-| CLI flags | ✓ | ✓ | | ✓ | |
-| Bug fixes | ✓ regression | ✓ if process | | | |
+| Change Type | Unit | Integration | Library | Proptest | Fuzz | Kani |
+|-------------|:----:|:-----------:|:-------:|:--------:|:----:|:----:|
+| New parsing function | ✓ | | | ✓ | ✓ | |
+| Process/signal handling | ✓ | ✓ | | | | maybe |
+| Unsafe blocks | ✓ | | | | | ✓ |
+| State machines | ✓ | ✓ | | | | ✓ |
+| Arithmetic operations | ✓ | | | | | ✓ |
+| CLI flags | ✓ | ✓ | | | ✓ | |
+| Public library API | ✓ | | ✓ | | | |
+| Bug fixes | ✓ regression | ✓ if process | | | | |
 
 ### Running Verification
 
@@ -167,6 +174,14 @@ Before submitting:
 
 ### Additional checks for specific changes:
 
+**Library API changes:**
+```
+[ ] Added tests to tests/library_api.rs
+[ ] Updated doc comments in src/lib.rs if public API changed
+[ ] Used #[non_exhaustive] on new public enums
+[ ] Added ..Default::default() examples for new config structs
+```
+
 **Parser changes:**
 ```
 [ ] Added proptest properties
@@ -191,8 +206,9 @@ Understanding the codebase:
 
 ```
 src/
-├── main.rs       # entry point, arg handling, json output
-├── runner.rs     # timeout logic, kqueue, signal forwarding
+├── lib.rs        # PUBLIC LIBRARY API - re-exports for crate users
+├── main.rs       # CLI entry point, arg handling, json output
+├── runner.rs     # timeout logic, kqueue, signal forwarding (core API)
 ├── process.rs    # posix_spawn wrapper, RawChild
 ├── args.rs       # CLI parsing (no clap - too heavy)
 ├── duration.rs   # parse "30s", "1.5m" without floats
@@ -207,7 +223,19 @@ src/
 ├── io.rs         # no_std print macros
 ├── panic.rs      # just abort, no formatting
 └── allocator.rs  # thin libc malloc wrapper
+
+tests/
+├── integration.rs   # CLI integration tests (179 tests)
+├── library_api.rs   # library API tests (10 tests)
+├── proptest.rs      # property-based tests (30 properties)
+└── benchmarks.rs    # performance benchmarks
 ```
+
+**Library API surface** (`src/lib.rs` re-exports):
+- `run_command`, `run_with_retry` - core execution functions
+- `RunConfig`, `RunResult` - configuration and result types
+- `setup_signal_forwarding`, `cleanup_signal_forwarding` - signal lifecycle
+- `parse_duration`, `parse_signal` - parsing helpers
 
 ## Binary Size Budget
 

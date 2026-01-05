@@ -70,6 +70,7 @@ cargo kani
 | Static analysis | style, known CVEs, size | seconds | 100% code |
 | Unit tests | logic errors, edge cases | seconds | targeted |
 | Integration tests | process lifecycle, IPC | seconds | real syscalls |
+| Library API tests | API usability, lifecycle | seconds | public API |
 | Proptest | invariant violations | seconds | ~7500 cases |
 | cargo-fuzz | crashes, panics, hangs | minutes-hours | ~500k exec/sec |
 | Kani | ALL bugs in bounded scope | minutes | mathematical proof |
@@ -78,21 +79,22 @@ cargo kani
 
 Which methods cover which modules:
 
-| Component | Unit | Integration | Proptest | Fuzz | Kani |
-|-----------|:----:|:-----------:|:--------:|:----:|:----:|
-| duration.rs | ✓ | | ✓ | ✓ | |
-| signal.rs | ✓ | | ✓ | ✓ | |
-| args.rs | ✓ | ✓ | | ✓ | |
-| rlimit.rs | ✓ | ✓ | ✓ | ✓ | |
-| process.rs | ✓ | ✓ | | | ✓ |
-| runner.rs | ✓ | ✓ | | | |
-| sync.rs | ✓ | | | | ✓ |
-| throttle.rs | ✓ | ✓ | | | ✓ |
-| proc_info.rs | ✓ | | | | ✓ |
-| time_math.rs | ✓ | | | | ✓ |
-| wait.rs | ✓ | ✓ | | | |
-| error.rs | ✓ | | | | |
-| io.rs | ✓ | | | | |
+| Component | Unit | Integration | Library | Proptest | Fuzz | Kani |
+|-----------|:----:|:-----------:|:-------:|:--------:|:----:|:----:|
+| duration.rs | ✓ | | ✓ | ✓ | ✓ | |
+| signal.rs | ✓ | | ✓ | ✓ | ✓ | |
+| args.rs | ✓ | ✓ | | | ✓ | |
+| rlimit.rs | ✓ | ✓ | | ✓ | ✓ | |
+| process.rs | ✓ | ✓ | | | | ✓ |
+| runner.rs | ✓ | ✓ | ✓ | | | |
+| sync.rs | ✓ | | | | | ✓ |
+| throttle.rs | ✓ | ✓ | | | | ✓ |
+| proc_info.rs | ✓ | | | | | ✓ |
+| time_math.rs | ✓ | | | | | ✓ |
+| wait.rs | ✓ | ✓ | | | | |
+| error.rs | ✓ | | ✓ | | | |
+| io.rs | ✓ | | | | | |
+| **lib.rs** | | | ✓ | | | |
 
 ---
 
@@ -135,14 +137,22 @@ mod tests {
 
 ```bash
 cargo test --test integration
+cargo test --test library_api
 ```
 
-**Coverage targets:**
+**CLI Integration** (`tests/integration.rs` - 179 tests):
 - timeout behavior (wall clock, active time)
 - signal forwarding (SIGTERM, SIGKILL, SIGINT)
 - process groups and cleanup
 - resource limits (memory, CPU)
 - exit codes (124, 125, 126, 127, 128+N)
+
+**Library API** (`tests/library_api.rs` - 10 tests):
+- `run_command` / `run_with_retry` functionality
+- `setup_signal_forwarding` / `cleanup_signal_forwarding` lifecycle
+- `parse_duration` / `parse_signal` helpers
+- Error handling and exit codes
+- Config construction with `..Default::default()`
 
 **Example:**
 ```rust
@@ -396,7 +406,8 @@ Required for:
 | Method | Count | Result | Executions |
 |--------|-------|--------|------------|
 | Unit tests | 154 | ✓ passing | - |
-| Integration | 179 | ✓ passing | - |
+| Integration (CLI) | 179 | ✓ passing | - |
+| Library API | 10 | ✓ passing | - |
 | Proptest | 30 | ✓ passing | ~7500/run |
 | cargo-fuzz | 4 targets | ✓ 0 crashes | ~70M total |
 | Kani | 19 proofs | ✓ 19/19 | - |
@@ -503,6 +514,7 @@ cargo kani setup
 | fuzz/corpus/*/ (seeds) | 2KB | ✓ |
 | fuzz/corpus/*/ (expanded) | 50KB+ | ✗ |
 | tests/proptest.rs | 8KB | ✓ |
+| tests/library_api.rs | 6KB | ✓ |
 | kani proofs (inline) | 3KB | ✓ |
 
-Total committed: ~18KB
+Total committed: ~24KB

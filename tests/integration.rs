@@ -3313,6 +3313,22 @@ fn test_mem_limit_kills_on_exceed() {
     /* should be killed due to memory limit, not timeout */
     let stdout = String::from_utf8_lossy(&output.stdout);
 
+    assert!(
+        stdout.contains(r#""schema_version":7"#),
+        "expected schema_version 7: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""status":"memory_limit""#),
+        "expected memory_limit status: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(r#""limit_bytes":"#) && stdout.contains(r#""actual_bytes":"#),
+        "expected limit_bytes and actual_bytes fields: {}",
+        stdout
+    );
+
     /* exit code should indicate killed (SIGKILL = 137) or resource limit */
     let code = output.status.code().unwrap_or(0);
     assert!(

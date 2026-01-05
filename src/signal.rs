@@ -16,6 +16,7 @@ use alloc::format;
 /* POSIX signals as i32 values from libc. Copy/PartialEq for easy comparison. */
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
+#[non_exhaustive]
 pub enum Signal {
     SIGHUP = libc::SIGHUP,
     SIGINT = libc::SIGINT,
