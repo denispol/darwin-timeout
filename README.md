@@ -94,7 +94,6 @@ darwin-timeout uses a **five-layer verification approach**:
 | **Formal verification (kani)** | 19 proofs | Mathematical proof of memory safety, no overflows |
 
 **What this means for you:**
-
 - Parsing code is fuzz-tested (found and fixed bugs before release)
 - Unsafe code has formal proofs (mathematically verified, not just tested)
 - State machines are proven correct (no race conditions in signal handling)
