@@ -68,7 +68,7 @@ echo ""
 
 if [[ -n "$GNU_TIMEOUT" ]]; then
     hyperfine --warmup 10 -N --runs 30 \
-        -n "darwin-timeout" "$TIMEOUT_BIN 1 true" \
+        -n "procguard" "$TIMEOUT_BIN 1 true" \
         -n "GNU timeout" "$GNU_TIMEOUT 1 true"
 else
     hyperfine --warmup 10 -N --runs 30 "$TIMEOUT_BIN 1 true"
@@ -84,7 +84,7 @@ echo ""
 echo -e "${CYAN}100ms timeout:${NC}"
 if [[ -n "$GNU_TIMEOUT" ]]; then
     hyperfine --warmup 5 -N -i --runs 15 \
-        -n "darwin-timeout" "$TIMEOUT_BIN 0.1 sleep 10" \
+        -n "procguard" "$TIMEOUT_BIN 0.1 sleep 10" \
         -n "GNU timeout" "$GNU_TIMEOUT 0.1 sleep 10"
 else
     hyperfine --warmup 5 -N -i --runs 15 "$TIMEOUT_BIN 0.1 sleep 10"
@@ -94,7 +94,7 @@ echo ""
 echo -e "${CYAN}1s timeout:${NC}"
 if [[ -n "$GNU_TIMEOUT" ]]; then
     hyperfine --warmup 3 -N -i --runs 10 \
-        -n "darwin-timeout" "$TIMEOUT_BIN 1 sleep 10" \
+        -n "procguard" "$TIMEOUT_BIN 1 sleep 10" \
         -n "GNU timeout" "$GNU_TIMEOUT 1 sleep 10"
 else
     hyperfine --warmup 3 -N -i --runs 10 "$TIMEOUT_BIN 1 sleep 10"
@@ -146,8 +146,8 @@ echo ""
 if [[ -n "$GNU_TIMEOUT" ]]; then
     echo -e "${CYAN}All three implementations (startup):${NC}"
     hyperfine --warmup 10 -N --runs 30 \
-        -n "darwin-timeout (wall, default)" "$TIMEOUT_BIN 1 true" \
-        -n "darwin-timeout (active)" "$TIMEOUT_BIN -c active 1 true" \
+        -n "procguard (wall, default)" "$TIMEOUT_BIN 1 true" \
+        -n "procguard (active)" "$TIMEOUT_BIN -c active 1 true" \
         -n "GNU timeout" "$GNU_TIMEOUT 1 true"
     echo ""
 else

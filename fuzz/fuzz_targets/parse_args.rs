@@ -34,5 +34,5 @@ fuzz_target!(|data: &[u8]| {
     }
 
     /* parse_from_slice must not panic on any argument combination */
-    let _ = darwin_timeout::args::parse_from_slice(&args);
+    let _ = procguard::args::parse_from_slice(&args);
 });

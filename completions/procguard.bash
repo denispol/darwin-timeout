@@ -1,7 +1,8 @@
-# bash completion for darwin-timeout
+# bash completion for procguard
 # copy to /etc/bash_completion.d/ or source in ~/.bashrc
+# Note: Also works when invoked as 'timeout' alias
 
-_timeout_completions() {
+_procguard_completions() {
     local cur prev opts
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
@@ -91,4 +92,5 @@ _timeout_completions() {
     fi
 }
 
-complete -F _timeout_completions timeout
+complete -F _procguard_completions procguard
+complete -F _procguard_completions timeout

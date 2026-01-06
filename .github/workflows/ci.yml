@@ -1,4 +1,4 @@
-# CI workflow for darwin-timeout.
+# CI workflow for procguard.
 #
 # Fast feedback on every push/PR: lint first (fast fail), then test.
 # See CONTRIBUTING.md "CI Auto-Verification Rules" for the full test matrix.

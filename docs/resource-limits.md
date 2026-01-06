@@ -1,6 +1,6 @@
 # Resource Limits
 
-`darwin-timeout` provides three complementary resource limiting mechanisms. Each uses a different enforcement strategy with distinct trade-offs.
+`procguard` provides three complementary resource limiting mechanisms. Each uses a different enforcement strategy with distinct trade-offs.
 
 ## Quick Reference
 
@@ -220,7 +220,7 @@ With `--json`, limits appear in the output:
 
 ```json
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "completed",
   "limits": {
     "mem_bytes": 1073741824,

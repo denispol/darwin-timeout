@@ -1,33 +1,47 @@
-darwin-timeout
-==============
+# procguard
 
-GNU `timeout` for macOS, done right. Works through sleep. ~100KB. Zero dependencies.
+The formally verified process supervisor for macOS.
 
-**CLI tool** — drop-in replacement for GNU timeout.  
-**Rust library** — embed timeout logic in your own tools.
+**CLI tool** — process timeouts, resource limits, lifecycle control.  
+**Rust library** — embed supervision logic in your own tools.
 
-    brew install denispol/tap/darwin-timeout        # CLI
-    cargo add darwin-timeout                        # library
+    brew install denispol/tap/procguard          # CLI
+    cargo add procguard                           # library
 
-Works exactly like GNU timeout:
+Works exactly like GNU timeout (it's a drop-in replacement):
 
-    timeout 30s ./slow-command           # kill after 30 seconds
-    timeout -k 5 1m ./stubborn           # SIGTERM, then SIGKILL after 5s
-    timeout --preserve-status 10s ./cmd  # exit with command's status
+    procguard 30s ./slow-command           # kill after 30 seconds
+    procguard -k 5 1m ./stubborn           # SIGTERM, then SIGKILL after 5s
+    procguard --preserve-status 10s ./cmd  # exit with command's status
 
 Plus features GNU doesn't have:
 
-    timeout --json 5m ./test-suite       # JSON output for CI
-    timeout -c active 1h ./benchmark     # pause timer during sleep (GNU behavior)
-    timeout --on-timeout 'cleanup.sh' 30s ./task  # pre-timeout hook
-    timeout --retry 3 30s ./flaky-test   # retry on timeout
-    timeout --mem-limit 1G 1h ./build    # kill if memory exceeds 1GB
-    timeout --cpu-percent 50 1h ./batch  # throttle to 50% CPU
+    procguard --json 5m ./test-suite       # JSON output for CI
+    procguard --on-timeout 'cleanup.sh' 30s ./task  # pre-timeout hook
+    procguard --retry 3 30s ./flaky-test   # retry on timeout
+    procguard --mem-limit 1G 1h ./build    # kill if memory exceeds 1GB
+    procguard --cpu-percent 50 1h ./batch  # throttle to 50% CPU
 
-**Coming from GNU coreutils?** darwin-timeout defaults to wall-clock time (survives sleep). Use `-c active` for GNU-like behavior where the timer pauses during sleep.
+## GNU Compatibility
 
-Why?
-----
+**Dual binary:** `procguard` is the primary binary. A `timeout` alias is also provided for scripts expecting GNU timeout.
+
+| Binary      | Default Behavior                  | Use Case                  |
+| ----------- | --------------------------------- | ------------------------- |
+| `procguard` | Wall clock (survives sleep)       | macOS-native, sleep-aware |
+| `timeout`   | Active time (pauses during sleep) | GNU-compatible scripts    |
+
+```bash
+# These behave identically to GNU timeout:
+timeout 30s ./command
+timeout -k 5 1m ./stubborn
+
+# procguard defaults to wall-clock (unique to macOS):
+procguard 30s ./command              # survives system sleep
+procguard -c active 30s ./command    # GNU-like behavior
+```
+
+## Why procguard?
 
 Apple doesn't ship `timeout`. The alternatives have problems:
 
@@ -40,9 +54,9 @@ Apple doesn't ship `timeout`. The alternatives have problems:
 
 - Also stops counting during sleep (uses `Instant`/`mach_absolute_time`)
 
-darwin-timeout uses `mach_continuous_time`, the only macOS clock that keeps ticking through sleep. Set 1 hour, get 1 hour, even if you close your laptop.
+procguard uses `mach_continuous_time`, the only macOS clock that keeps ticking through sleep. Set 1 hour, get 1 hour, even if you close your laptop.
 
-**Scenario:** `timeout 1h ./build` with laptop sleeping 45min in the middle
+**Scenario:** `procguard 1h ./build` with laptop sleeping 45min in the middle
 
     0        15min                 1h                    1h 45min
     ├──────────┬──────────────────────────────┬──────────────────────────────┤
@@ -50,7 +64,7 @@ darwin-timeout uses `mach_continuous_time`, the only macOS clock that keeps tick
               │  awake   │            sleep             │            awake             │
               └──────────┴──────────────────────────────┴──────────────────────────────┘
 
-    darwin-timeout  |██████████|██████████████████████████████^ fires at 1h ✓
+    procguard       |██████████|██████████████████████████████^ fires at 1h ✓
                                (counts sleep time)
 
     GNU timeout     |██████████|······························|██████████████████████████████^ fires at 1h 45min ✗
@@ -58,42 +72,43 @@ darwin-timeout uses `mach_continuous_time`, the only macOS clock that keeps tick
 
     Legend: ▓ awake  ░ sleep  █ counting  · paused  ^ fire point
 
-|                           | darwin-timeout | GNU coreutils |
-|---------------------------|----------------|---------------|
-| Works during system sleep | ✓              | ✗             |
-| Selectable time mode      | ✓ (wall/active)| ✗ (active only)|
-| **Resource limits**       | ✓ (mem/CPU)    | ✗             |
-| JSON output               | ✓              | ✗             |
-| Retry on timeout          | ✓              | ✗             |
-| Stdin idle timeout        | ✓              | ✗             |
-| Pre-timeout hooks         | ✓              | ✗             |
-| CI heartbeat (keep-alive) | ✓              | ✗             |
-| Wait-for-file             | ✓              | ✗             |
-| Custom exit codes         | ✓              | ✗             |
-| Env var configuration     | ✓              | ✗             |
-| Binary size               | ~100KB          | 15.7MB        |
-| Startup time              | 3.6ms          | 4.2ms         |
-| Zero CPU while waiting    | ✓ (kqueue)     | ✓ (nanosleep) |
+|                           | procguard          | GNU coreutils   |
+| ------------------------- | ------------------ | --------------- |
+| Works during system sleep | ✓                  | ✗               |
+| Selectable time mode      | ✓ (wall/active)    | ✗ (active only) |
+| **Resource limits**       | ✓ (mem/CPU)        | ✗               |
+| **Formal verification**   | ✓ (19 kani proofs) | ✗               |
+| JSON output               | ✓                  | ✗               |
+| Retry on timeout          | ✓                  | ✗               |
+| Stdin idle timeout        | ✓                  | ✗               |
+| Pre-timeout hooks         | ✓                  | ✗               |
+| CI heartbeat (keep-alive) | ✓                  | ✗               |
+| Wait-for-file             | ✓                  | ✗               |
+| Custom exit codes         | ✓                  | ✗               |
+| Env var configuration     | ✓                  | ✗               |
+| Binary size               | ~100KB             | 15.7MB          |
+| Startup time              | 3.6ms              | 4.2ms           |
+| Zero CPU while waiting    | ✓ (kqueue)         | ✓ (nanosleep)   |
 
-*Performance data from [250 benchmark runs](#benchmarks) on Apple M4 Pro.*
+_Performance data from [250 benchmark runs](#benchmarks) on Apple M4 Pro._
 
 100% GNU-compatible. All flags work identically (`-s`, `-k`, `-p`, `-f`, `-v`). Drop-in replacement for Apple Silicon and Intel Macs.
 
-Quality & Testing
------------------
+## Quality & Verification
 
-darwin-timeout uses a **five-layer verification approach**:
+procguard uses a **five-layer verification approach**:
 
-| Method | Coverage | What It Catches |
-|--------|----------|-----------------|
-| **Unit tests** | 154 tests | Logic errors, edge cases |
-| **Integration tests** | 179 tests | Real process behavior, signals, I/O |
-| **Library API tests** | 10 tests | Public API usability, lifecycle |
-| **Property-based (proptest)** | 30 properties, ~7500 cases | Input invariants, mathematical relationships |
-| **Fuzzing (cargo-fuzz)** | 4 targets, ~70M executions | Crashes, panics, hangs from malformed input |
-| **Formal verification (kani)** | 19 proofs | Mathematical proof of memory safety, no overflows |
+| Method                         | Coverage                   | What It Catches                                   |
+| ------------------------------ | -------------------------- | ------------------------------------------------- |
+| **Unit tests**                 | 154 tests                  | Logic errors, edge cases                          |
+| **Integration tests**          | 184 tests                  | Real process behavior, signals, I/O               |
+| **Library API tests**          | 10 tests                   | Public API usability, lifecycle                   |
+| **Property-based (proptest)**  | 30 properties, ~7500 cases | Input invariants, mathematical relationships      |
+| **Fuzzing (cargo-fuzz)**       | 4 targets, ~70M executions | Crashes, panics, hangs from malformed input       |
+| **Formal verification (kani)** | 19 proofs                  | Mathematical proof of memory safety, no overflows |
 
 **What this means for you:**
+
 - Parsing code is fuzz-tested (found and fixed bugs before release)
 - Unsafe code has formal proofs (mathematically verified, not just tested)
 - State machines are proven correct (no race conditions in signal handling)
@@ -101,108 +116,76 @@ darwin-timeout uses a **five-layer verification approach**:
 
 See [docs/VERIFICATION.md](docs/VERIFICATION.md) for methodology details.
 
-Install
--------
+## Install
 
 **Homebrew** (recommended):
 
-    brew install denispol/tap/darwin-timeout
+    brew install denispol/tap/procguard
 
-**Binary download:** Grab the universal binary (arm64 + x86_64) from [releases](https://github.com/denispol/darwin-timeout/releases).
+**Binary download:** Grab the universal binary (arm64 + x86_64) from [releases](https://github.com/denispol/procguard/releases).
 
 **From source (CLI):**
 
     cargo build --release
-    sudo cp target/release/timeout /usr/local/bin/
+    sudo cp target/release/procguard /usr/local/bin/
+    sudo ln -s procguard /usr/local/bin/timeout  # optional: GNU-compatible alias
 
 **As a Rust library:**
 
-    cargo add darwin-timeout
+    cargo add procguard
 
 Shell completions are installed automatically with Homebrew. For manual install, see [completions/](completions/).
 
-Quick Start
------------
+## Quick Start
 
-    timeout 30 ./slow-command           # kill after 30 seconds
-    timeout -k 5 30 ./stubborn          # SIGTERM, then SIGKILL after 5s
-    timeout --json 1m ./build           # JSON output for CI
-    timeout -v 10 ./script              # verbose: shows signals sent
+    procguard 30 ./slow-command           # kill after 30 seconds
+    procguard -k 5 30 ./stubborn          # SIGTERM, then SIGKILL after 5s
+    procguard --json 1m ./build           # JSON output for CI
+    procguard -v 10 ./script              # verbose: shows signals sent
 
-Use Cases
----------
+## Use Cases
 
 **CI/CD**: Stop flaky tests before they hang your pipeline.
 
-    timeout --json 5m ./run-tests
+    procguard --json 5m ./run-tests
 
 **Overnight builds**: Timeouts that work even when your Mac sleeps.
 
-    timeout 2h make release             # 2 hours wall-clock, guaranteed
+    procguard 2h make release             # 2 hours wall-clock, guaranteed
 
 **Network ops**: Don't wait forever for unresponsive servers.
 
-    timeout 10s curl https://api.example.com/health
+    procguard 10s curl https://api.example.com/health
 
 **Script safety**: Ensure cleanup scripts actually finish.
 
-    timeout -k 10s 60s ./cleanup.sh
+    procguard -k 10s 60s ./cleanup.sh
 
 **Coordinated startup**: Wait for dependencies before running.
 
-    timeout --wait-for-file /tmp/db-ready 5m ./migrate
+    procguard --wait-for-file /tmp/db-ready 5m ./migrate
 
-**Prompt detection**: Kill commands that unexpectedly prompt for input. Catch interactive tests hanging on stdin in unattended CI environments.
+**Prompt detection**: Kill commands that unexpectedly prompt for input.
 
-    timeout --stdin-timeout 5s ./test-suite  # fail if it prompts for input
+    procguard --stdin-timeout 5s ./test-suite  # fail if it prompts for input
 
-> **Note:** `--stdin-timeout` alone **consumes stdin data** to detect activity—the child won't receive it. This is ideal for detecting unexpected prompts in non-interactive CI.
+**Stream watchdog**: Detect stalled data pipelines without consuming the stream.
 
-**Stream watchdog**: Detect stalled data pipelines without consuming the stream. If upstream stops sending data for too long, kill the pipeline. The child receives all data intact, which is perfect for production backup and log shipping pipelines.
-
-    # Database backup: kill if pg_dump stalls for 2+ minutes
-    # Protects against database locks, network issues, or hung queries
-    pg_dump mydb | timeout -S 2m --stdin-passthrough 4h gzip | \
+    pg_dump mydb | procguard -S 2m --stdin-passthrough 4h gzip | \
         aws s3 cp - s3://backups/db-$(date +%Y%m%d).sql.gz
 
-    # Kubernetes log shipping: fail if pod stops emitting logs for 30s
-    # Catches crashed pods, network issues, or stuck log tails
-    kubectl logs -f deployment/app --since=10m | \
-        timeout -S 30s --stdin-passthrough 24h ./ship-to-elasticsearch.sh
+**CI keep-alive**: Prevent CI systems from killing long jobs.
 
-    # Real-time data sync: abort if upstream stops sending for 5 minutes
-    nc data-source 9000 | timeout -S 5m --stdin-passthrough 48h ./process-stream.sh
+    procguard --heartbeat 60s 2h ./integration-tests
 
-> **How it works:** The timer resets on every stdin activity. When stdin reaches EOF (closed pipe), monitoring stops and wall clock timeout takes over. Data flows to the child untouched.
+**Resource sandboxing**: Enforce memory and CPU limits.
 
-**CI keep-alive**: Many CI systems (GitHub Actions, GitLab CI, Travis) kill jobs that produce no output for 10-30 minutes. Long builds, test suites, or deployments can trigger this even when working correctly. The heartbeat flag prints periodic status messages to prevent these false timeouts:
+    procguard --mem-limit 4G 2h make -j8
+    procguard --cpu-percent 50 1h ./batch-process
 
-    timeout --heartbeat 60s 2h ./integration-tests
-    # every 60s: timeout: heartbeat: 5m 0s elapsed, command still running (pid 12345)
+## Options
 
-    # combine with --json for structured CI output
-    timeout --heartbeat 30s --json 1h ./deploy.sh
-
-**Resource sandboxing**: Enforce memory and CPU limits on untrusted or runaway processes. No containers, no cgroups, no root—just process-level enforcement that actually works on macOS.
-
-    # Memory guard: kill if build exceeds 4GB (prevents OOM-induced system freeze)
-    timeout --mem-limit 4G 2h make -j8
-
-    # CPU throttle: limit background job to 50% of one core
-    timeout --cpu-percent 50 1h ./batch-process
-
-    # Multi-core cap: allow up to 4 cores (400%) for parallel builds
-    timeout --cpu-percent 400 --mem-limit 8G 1h cargo build --release -j8
-
-    # Full resource box: time + memory + CPU limits together
-    timeout --mem-limit 512M --cpu-percent 25 --cpu-time 5m 30m ./untrusted-script
-
-> **Why this matters:** macOS has no cgroups. `ulimit` memory limits don't work. Until now, there was no way to enforce resource limits on a single command without containers or third-party daemons. darwin-timeout brings Linux-style resource control to macOS, in ~100KB.
-
-Options
--------
-
-    timeout [OPTIONS] DURATION COMMAND [ARGS...]
+    procguard [OPTIONS] DURATION COMMAND [ARGS...]
 
 **GNU-compatible flags:**
 
@@ -212,7 +195,7 @@ Options
     -p, --preserve-status    exit with command's status, not 124
     -f, --foreground         don't create process group
 
-**darwin-timeout extensions:**
+**procguard extensions:**
 
     -q, --quiet              suppress error messages
     -c, --confine MODE       time mode: 'wall' (default) or 'active'
@@ -226,172 +209,69 @@ Options
     -r, --retry N            retry command up to N times on timeout
     --retry-delay T          delay between retries (default: 0)
     --retry-backoff Nx       multiply delay by N each retry (e.g., 2x)
-    -S, --stdin-timeout T    kill command if stdin is idle for T (consumes stdin; for prompt detection)
+    -S, --stdin-timeout T    kill command if stdin is idle for T
     --stdin-passthrough      non-consuming stdin idle detection (pair with -S)
     --mem-limit SIZE         kill if memory exceeds SIZE (e.g., 512M, 2G, 1T)
     --cpu-time T             hard CPU time limit via RLIMIT_CPU (e.g., 30s, 5m)
-    --cpu-percent PCT        throttle CPU to PCT% via SIGSTOP/SIGCONT (e.g., 50, 200)
+    --cpu-percent PCT        throttle CPU to PCT% via SIGSTOP/SIGCONT
 
 **Duration format:** number with optional suffix `ms` (milliseconds), `us`/`µs` (microseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Fractional values supported: `0.5s`, `1.5ms`, `100us`.
 
 **Exit codes:**
 
     0       command completed successfully
-    124     timed out, or --wait-for-file timed out (custom via --timeout-exit-code)
-    125     timeout itself failed
+    124     timed out (custom via --timeout-exit-code)
+    125     procguard itself failed
     126     command found but not executable
     127     command not found
     128+N   command killed by signal N
 
-Time Modes
-----------
+## Time Modes
 
-**wall** (default): Real elapsed time, including system sleep. A 1-hour timeout fires after 1 hour of wall-clock time, even if your Mac sleeps for 45 minutes.
+**wall** (default for `procguard`): Real elapsed time, including system sleep.
 
-    timeout 1h ./build
-    timeout -c wall 1h ./build           # explicit
+    procguard 1h ./build                   # fires after 1 hour wall-clock
 
-**active**: Only counts time when the system is awake. This matches GNU timeout behavior, useful for benchmarks or when you want the timer to pause during sleep.
+**active** (default for `timeout` alias): Only counts time when awake. Matches GNU behavior.
 
-    timeout -c active 1h ./benchmark     # pauses during sleep, like GNU timeout
+    procguard -c active 1h ./benchmark     # pauses during sleep
+    timeout 1h ./benchmark                 # same (timeout alias defaults to active)
 
 Under the hood: `wall` uses `mach_continuous_time`, `active` uses `CLOCK_MONOTONIC_RAW`.
 
-Resource Limits
----------------
+## Resource Limits
 
-Enforce memory and CPU constraints without containers or root privileges. Three complementary mechanisms:
+Enforce memory and CPU constraints without containers or root privileges.
 
 **Memory limit** (`--mem-limit`): Kill process if physical memory exceeds threshold.
 
-    timeout --mem-limit 2G 1h ./memory-hungry-app
-    timeout --mem-limit 512M --kill-after 5s 30m ./leak-prone-service
-
-Supports: `K`/`KB`, `M`/`MB`, `G`/`GB`, `T`/`TB` (binary units, case-insensitive).
+    procguard --mem-limit 2G 1h ./memory-hungry-app
 
 **CPU time limit** (`--cpu-time`): Hard limit on total CPU seconds consumed.
 
-    timeout --cpu-time 5m 1h ./compute-job    # max 5 minutes of CPU time
-
-Kernel-enforced via RLIMIT_CPU. Process receives SIGXCPU then SIGKILL.
+    procguard --cpu-time 5m 1h ./compute-job
 
 **CPU throttle** (`--cpu-percent`): Actively limit CPU usage percentage.
 
-    timeout --cpu-percent 50 1h ./background-task    # 50% of one core
-    timeout --cpu-percent 200 1h ./parallel-job      # max 2 cores
-    timeout --cpu-percent 800 1h make -j8            # max 8 cores
+    procguard --cpu-percent 50 1h ./background-task
 
-Uses SIGSTOP/SIGCONT with integral control for precise convergence to target percentage. Multi-core aware: 100 = 1 core, 400 = 4 cores.
+See [docs/resource-limits.md](docs/resource-limits.md) for details.
 
-**Combining limits**: All three can be used together.
+## JSON Output
 
-    timeout --mem-limit 1G --cpu-time 10m --cpu-percent 50 1h ./untrusted
+Machine-readable output for CI/CD pipelines:
 
-See [docs/resource-limits.md](docs/resource-limits.md) for implementation details, algorithm explanation, and advanced use cases.
+    $ procguard --json 1s sleep 0.5
+    {"schema_version":8,"status":"completed","exit_code":0,"elapsed_ms":504,...}
 
-JSON Output
------------
+See [docs/json-output.md](docs/json-output.md) for complete schema.
 
-Machine-readable output for CI/CD pipelines and automation:
+## Library Usage
 
-    $ timeout --json 1s sleep 0.5
-    {"schema_version":7,"status":"completed","exit_code":0,"elapsed_ms":504,"user_time_ms":1,"system_time_ms":2,"max_rss_kb":1248}
-
-    $ timeout --json 0.5s sleep 10
-    {"schema_version":7,"status":"timeout","timeout_reason":"wall_clock","signal":"SIGTERM","signal_num":15,"killed":false,"command_exit_code":-1,"exit_code":124,"elapsed_ms":502,"user_time_ms":0,"system_time_ms":1,"max_rss_kb":1232}
-
-**Status types:** `completed`, `timeout`, `memory_limit`, `signal_forwarded`, `error`
-
-**Timeout reasons:** `wall_clock` (main timeout), `stdin_idle` (-S/--stdin-timeout)
-
-Includes resource usage metrics: CPU time (`user_time_ms`, `system_time_ms`) and peak memory (`max_rss_kb`).
-
-See [docs/json-output.md](docs/json-output.md) for complete schema documentation, field reference, and integration examples.
-
-Environment Variables
----------------------
-
-Configure defaults without CLI flags:
-
-    TIMEOUT                       default duration if CLI arg isn't a valid duration
-    TIMEOUT_SIGNAL                default signal (overridden by -s)
-    TIMEOUT_KILL_AFTER            default kill-after (overridden by -k)
-    TIMEOUT_RETRY                 default retry count (overridden by -r/--retry)
-    TIMEOUT_HEARTBEAT             default heartbeat interval (overridden by -H/--heartbeat)
-    TIMEOUT_STDIN_TIMEOUT         default stdin idle timeout (overridden by -S/--stdin-timeout)
-    TIMEOUT_WAIT_FOR_FILE         default file to wait for
-    TIMEOUT_WAIT_FOR_FILE_TIMEOUT timeout for wait-for-file
-
-Pre-timeout Hooks
------------------
-
-Run a command when timeout fires, before sending the signal:
-
-    timeout --on-timeout 'echo "killing $p" >> /tmp/log' 5s ./long-task
-    timeout --on-timeout 'kill -QUIT %p' --on-timeout-limit 2s 30s ./server
-
-`%p` is replaced with the child PID. Hooks have their own timeout (default 5s).
-
-How It Works
-------------
-
-Built on Darwin kernel primitives:
-
-- **kqueue + EVFILT_PROC + EVFILT_TIMER**: monitors process exit and timeout with zero CPU overhead
-- **mach_continuous_time**: wall-clock that survives system sleep (the key differentiator)
-- **CLOCK_MONOTONIC_RAW**: active-time clock, pauses during sleep
-- **posix_spawn**: lightweight process creation (faster than fork+exec)
-- **Signal forwarding**: SIGTERM/SIGINT/SIGHUP/SIGQUIT/SIGUSR1/SIGUSR2 forwarded to child process group
-- **Process groups**: child runs in own group so signals reach all descendants
-
-~100KB `no_std` binary. Custom allocator, direct syscalls, no libstd runtime.
-
-Benchmarks
-----------
-
-All benchmarks on Apple M4 Pro, macOS Tahoe 26.2, hyperfine 1.20.0.
-See [docs/benchmarks/](docs/benchmarks/) for raw data and methodology.
-
-    # Binary size
-    darwin-timeout: ~100KB
-    GNU coreutils:  15.7MB (157x larger)
-
-    # Startup overhead (250 runs across 5 sessions)
-    darwin-timeout: 3.6ms ± 0.2ms
-    GNU timeout:    4.2ms ± 0.2ms (18% slower)
-
-    # Timeout precision (20 runs, 1s timeout)
-    darwin-timeout: 1.014s ± 0.003s
-    GNU timeout:    1.017s ± 0.001s (identical)
-
-    # CPU while waiting
-    darwin-timeout: 0.00 user, 0.00 sys (kqueue blocks)
-
-    # Feature overhead (vs baseline)
-    --json flag:      0% overhead
-    --verbose flag:   0% overhead
-    --retry flag:     0% overhead (when not triggered)
-    --heartbeat flag: 0% overhead (prints only at intervals)
-
-Development
------------
-
-    cargo test                  # run tests
-    cargo test --test proptest  # property-based tests
-    cargo clippy                # lint
-    ./scripts/verify-all.sh     # full verification suite
-
-**Contributing:** See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, verification requirements, and the testing pyramid.
-
-**Verification:** This project uses five verification methods: unit tests, integration tests, proptest, cargo-fuzz, and kani formal proofs. See [docs/VERIFICATION.md](docs/VERIFICATION.md) for details.
-
-Library Usage
--------------
-
-The `darwin_timeout` crate exposes the core timeout functionality for embedding in your own tools:
+The `procguard` crate exposes the core timeout functionality for embedding in your own tools:
 
 ```rust
-use darwin_timeout::{RunConfig, RunResult, Signal, run_command, setup_signal_forwarding};
+use procguard::{RunConfig, RunResult, Signal, run_command, setup_signal_forwarding};
 use std::time::Duration;
 
 let _ = setup_signal_forwarding();
@@ -418,13 +298,21 @@ match run_command("sh", &args, &config) {
 
 **Platform:** macOS only (uses Darwin kernel APIs).
 
-**API Docs:** [docs.rs/darwin-timeout](https://docs.rs/darwin-timeout)
+**API Docs:** [docs.rs/procguard](https://docs.rs/procguard)
 
-**Performance:** Library calls have the same performance as CLI invocations—both use identical code paths. No additional overhead.
+> ⚠️ **Stability:** The library API is experimental. Use `..RunConfig::default()` when constructing configs.
 
-> ⚠️ **Stability:** The library API is experimental. Use `..RunConfig::default()` when constructing configs and include wildcard arms in `RunResult` matches to ensure forward compatibility with new fields and variants.
+## Development
 
-License
--------
+    cargo test                  # run tests
+    cargo test --test proptest  # property-based tests
+    cargo clippy                # lint
+    ./scripts/verify-all.sh     # full verification suite
+
+**Contributing:** See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow.
+
+**Verification:** See [docs/VERIFICATION.md](docs/VERIFICATION.md) for testing methodology.
+
+## License
 
 MIT

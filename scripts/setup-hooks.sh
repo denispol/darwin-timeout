@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Install git hooks for darwin-timeout development.
+# Install git hooks for procguard development.
 #
 # Usage: ./scripts/setup-hooks.sh
 #

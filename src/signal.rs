@@ -98,7 +98,7 @@ impl Signal {
 /// # Examples
 ///
 /// ```
-/// use darwin_timeout::signal::{parse_signal, Signal};
+/// use procguard::signal::{parse_signal, Signal};
 ///
 /// assert_eq!(parse_signal("TERM").unwrap(), Signal::SIGTERM);
 /// assert_eq!(parse_signal("SIGTERM").unwrap(), Signal::SIGTERM);

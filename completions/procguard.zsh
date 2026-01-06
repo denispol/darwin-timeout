@@ -1,9 +1,10 @@
-#compdef timeout
+#compdef procguard timeout
 
-# zsh completion for darwin-timeout
+# zsh completion for procguard
 # copy to a directory in your $fpath, e.g., ~/.zsh/completions/
+# Note: Works for both 'procguard' and 'timeout' alias
 
-_timeout() {
+_procguard() {
     local context state state_descr line
     typeset -A opt_args
 
@@ -71,4 +72,4 @@ _timeout() {
     return 1
 }
 
-_timeout "$@"
+_procguard "$@"

@@ -5,6 +5,11 @@
  * The interesting stuff is in runner.rs.
  *
  * --json is for CI. Format is stable, don't change field names.
+ *
+ * Dual binary support:
+ * - "procguard": wall-clock default (survives sleep)
+ * - "timeout": GNU-compatible active-time default (pauses on sleep)
+ * Detection is via argv[0] - if invoked as "timeout", defaults to --confine active.
  */
 
 #![cfg_attr(not(any(debug_assertions, test, doc)), no_std)]
@@ -15,14 +20,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Write as FmtWrite;
 
-use darwin_timeout::args::{OwnedArgs, parse_args};
-use darwin_timeout::duration::parse_duration;
-use darwin_timeout::error::exit_codes;
-use darwin_timeout::runner::{
+use procguard::args::{Confine, OwnedArgs, parse_args};
+use procguard::duration::parse_duration;
+use procguard::error::exit_codes;
+use procguard::runner::{
     AttemptResult, RunConfig, RunResult, run_with_retry, setup_signal_forwarding,
 };
-use darwin_timeout::wait::wait_for_file;
-use darwin_timeout::{eprintln, println};
+use procguard::wait::wait_for_file;
+use procguard::{eprintln, println};
 
 /* import alloc crate in no_std mode */
 #[cfg(not(any(debug_assertions, test, doc)))]
@@ -159,28 +164,49 @@ fn main() {
 
 /* shared implementation */
 fn run_main() -> u8 {
-    let args = match parse_args() {
+    let mut args = match parse_args() {
         Ok(args) => args,
         Err(e) => {
-            eprintln!("timeout: {}", e);
+            eprintln!("procguard: {}", e);
             return exit_codes::INTERNAL_ERROR;
         }
     };
 
-    let timeout_env = darwin_timeout::args::get_env(b"TIMEOUT\0");
+    /* argv[0] detection: when invoked as "timeout", default to --confine active (GNU behavior) */
+    let is_timeout_alias = procguard::args::get_argv0()
+        .map(|s| {
+            /* extract basename (e.g., "/usr/local/bin/timeout" -> "timeout") */
+            s.rsplit('/').next().unwrap_or(&s) == "timeout"
+        })
+        .unwrap_or(false);
+    if is_timeout_alias && !args.confine_specified {
+        args.confine = Confine::Active;
+    }
+
+    /* binary name for error messages */
+    let prog_name = if is_timeout_alias {
+        "timeout"
+    } else {
+        "procguard"
+    };
+
+    let timeout_env = procguard::args::get_env(b"TIMEOUT\0");
     let (duration_str, command, extra_args) = resolve_args(&args, timeout_env.as_deref());
 
     let (duration_str, command) = match (duration_str, command) {
         (Some(d), Some(c)) => (d, c),
         (None, _) => {
             if !args.quiet {
-                eprintln!("timeout: missing duration (provide as argument or set TIMEOUT env var)");
+                eprintln!(
+                    "{}: missing duration (provide as argument or set TIMEOUT env var)",
+                    prog_name
+                );
             }
             return exit_codes::INTERNAL_ERROR;
         }
         (Some(_), None) => {
             if !args.quiet {
-                eprintln!("timeout: missing command");
+                eprintln!("{}: missing command", prog_name);
             }
             return exit_codes::INTERNAL_ERROR;
         }
@@ -190,7 +216,7 @@ fn run_main() -> u8 {
         Ok(config) => config,
         Err(e) => {
             if !args.quiet {
-                eprintln!("timeout: {}", e);
+                eprintln!("{}: {}", prog_name, e);
             }
             return e.exit_code();
         }
@@ -208,7 +234,7 @@ fn run_main() -> u8 {
             Ok(t) => t,
             Err(e) => {
                 if !args.quiet {
-                    eprintln!("timeout: invalid --wait-for-file-timeout: {}", e);
+                    eprintln!("{}: invalid --wait-for-file-timeout: {}", prog_name, e);
                 }
                 return exit_codes::INTERNAL_ERROR;
             }
@@ -220,11 +246,11 @@ fn run_main() -> u8 {
                     let secs = d.as_secs();
                     let tenths = d.subsec_millis() / 100;
                     eprintln!(
-                        "timeout: waiting for file '{}' (timeout: {}.{}s)",
-                        path, secs, tenths
+                        "{}: waiting for file '{}' (timeout: {}.{}s)",
+                        prog_name, path, secs, tenths
                     );
                 }
-                None => eprintln!("timeout: waiting for file '{}' (no timeout)", path),
+                None => eprintln!("{}: waiting for file '{}' (no timeout)", prog_name, path),
             }
         }
 
@@ -232,13 +258,13 @@ fn run_main() -> u8 {
             if args.json {
                 print_json_error(&e, 0);
             } else if !args.quiet {
-                eprintln!("timeout: {}", e);
+                eprintln!("{}: {}", prog_name, e);
             }
             return e.exit_code();
         }
 
         if args.verbose && !args.quiet {
-            eprintln!("timeout: file '{}' found, starting command", path);
+            eprintln!("{}: file '{}' found, starting command", prog_name, path);
         }
     }
 
@@ -276,6 +302,7 @@ fn run_main() -> u8 {
                     config.retry_count,
                     &config.limits,
                     config.cpu_throttle,
+                    config.confine,
                 );
             }
 
@@ -285,7 +312,7 @@ fn run_main() -> u8 {
             if args.json {
                 print_json_error(&e, elapsed_ms);
             } else if !args.quiet {
-                eprintln!("timeout: {}", e);
+                eprintln!("{}: {}", prog_name, e);
             }
             e.exit_code()
         }
@@ -300,20 +327,29 @@ fn run_main() -> u8 {
  * SIGKILL during the write could still produce partial output. CI systems
  * parsing this output should validate JSON before processing.
  */
+#[allow(clippy::too_many_arguments)]
 fn print_json_output(
     result: &RunResult,
     elapsed_ms: u64,
     exit_code: u8,
     attempts: &[AttemptResult],
     retry_count: u32,
-    limits: &darwin_timeout::ResourceLimits,
-    cpu_throttle: Option<darwin_timeout::throttle::CpuThrottleConfig>,
+    limits: &procguard::ResourceLimits,
+    cpu_throttle: Option<procguard::throttle::CpuThrottleConfig>,
+    confine: Confine,
 ) {
-    /* Schema version 7: memory limit exceeded status */
-    const SCHEMA_VERSION: u8 = 7;
+    /* Schema version 8: added clock field for time measurement mode */
+    const SCHEMA_VERSION: u8 = 8;
+
+    /* convert Confine to JSON string */
+    let clock_str = match confine {
+        Confine::Wall => "wall",
+        Confine::Active => "active",
+        _ => "unknown", /* future-proof for #[non_exhaustive] */
+    };
 
     /* helper to append rusage fields to JSON string */
-    fn append_rusage(json: &mut String, rusage: Option<&darwin_timeout::process::ResourceUsage>) {
+    fn append_rusage(json: &mut String, rusage: Option<&procguard::process::ResourceUsage>) {
         if let Some(r) = rusage {
             let _ = write!(
                 json,
@@ -352,8 +388,8 @@ fn print_json_output(
     /* helper to append resource limits metadata if configured */
     fn append_limits(
         json: &mut String,
-        limits: &darwin_timeout::ResourceLimits,
-        cpu_throttle: Option<darwin_timeout::throttle::CpuThrottleConfig>,
+        limits: &procguard::ResourceLimits,
+        cpu_throttle: Option<procguard::throttle::CpuThrottleConfig>,
     ) {
         if limits.mem_bytes.is_none() && limits.cpu_time.is_none() && cpu_throttle.is_none() {
             return;
@@ -393,8 +429,8 @@ fn print_json_output(
             let mut json = String::with_capacity(256);
             let _ = write!(
                 json,
-                r#"{{"schema_version":{},"status":"completed","exit_code":{},"elapsed_ms":{}"#,
-                SCHEMA_VERSION, code, elapsed_ms
+                r#"{{"schema_version":{},"status":"completed","clock":"{}","exit_code":{},"elapsed_ms":{}"#,
+                SCHEMA_VERSION, clock_str, code, elapsed_ms
             );
             append_rusage(&mut json, Some(rusage));
             append_attempts(&mut json, attempts, retry_count);
@@ -410,12 +446,12 @@ fn print_json_output(
             hook,
             reason,
         } => {
-            let sig_num = darwin_timeout::signal::signal_number(*signal);
+            let sig_num = procguard::signal::signal_number(*signal);
             let status_code = status.and_then(|s| s.code()).unwrap_or(-1);
-            let sig_name = darwin_timeout::signal::signal_name(*signal);
+            let sig_name = procguard::signal::signal_name(*signal);
             let reason_str = match reason {
-                darwin_timeout::runner::TimeoutReason::WallClock => "wall_clock",
-                darwin_timeout::runner::TimeoutReason::StdinIdle => "stdin_idle",
+                procguard::runner::TimeoutReason::WallClock => "wall_clock",
+                procguard::runner::TimeoutReason::StdinIdle => "stdin_idle",
                 _ => "unknown", /* future-proof for #[non_exhaustive] */
             };
 
@@ -423,8 +459,9 @@ fn print_json_output(
             let mut json = String::with_capacity(512);
             let _ = write!(
                 json,
-                r#"{{"schema_version":{},"status":"timeout","timeout_reason":"{}","signal":"{}","signal_num":{},"killed":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}"#,
+                r#"{{"schema_version":{},"status":"timeout","clock":"{}","timeout_reason":"{}","signal":"{}","signal_num":{},"killed":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}"#,
                 SCHEMA_VERSION,
+                clock_str,
                 reason_str,
                 sig_name,
                 sig_num,
@@ -470,15 +507,16 @@ fn print_json_output(
             limit_bytes,
             actual_bytes,
         } => {
-            let sig_num = darwin_timeout::signal::signal_number(*signal);
+            let sig_num = procguard::signal::signal_number(*signal);
             let status_code = status.and_then(|s| s.code()).unwrap_or(-1);
-            let sig_name = darwin_timeout::signal::signal_name(*signal);
+            let sig_name = procguard::signal::signal_name(*signal);
 
             let mut json = String::with_capacity(512);
             let _ = write!(
                 json,
-                r#"{{"schema_version":{},"status":"memory_limit","signal":"{}","signal_num":{},"killed":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{},"limit_bytes":{},"actual_bytes":{}"#,
+                r#"{{"schema_version":{},"status":"memory_limit","clock":"{}","signal":"{}","signal_num":{},"killed":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{},"limit_bytes":{},"actual_bytes":{}"#,
                 SCHEMA_VERSION,
+                clock_str,
                 sig_name,
                 sig_num,
                 killed,
@@ -500,14 +538,15 @@ fn print_json_output(
             status,
             rusage,
         } => {
-            let sig_num = darwin_timeout::signal::signal_number(*signal);
+            let sig_num = procguard::signal::signal_number(*signal);
             let status_code = status.and_then(|s| s.code()).unwrap_or(-1);
             let mut json = String::with_capacity(256);
             let _ = write!(
                 json,
-                r#"{{"schema_version":{},"status":"signal_forwarded","signal":"{}","signal_num":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}"#,
+                r#"{{"schema_version":{},"status":"signal_forwarded","clock":"{}","signal":"{}","signal_num":{},"command_exit_code":{},"exit_code":{},"elapsed_ms":{}"#,
                 SCHEMA_VERSION,
-                darwin_timeout::signal::signal_name(*signal),
+                clock_str,
+                procguard::signal::signal_name(*signal),
                 sig_num,
                 status_code,
                 exit_code,
@@ -524,8 +563,8 @@ fn print_json_output(
             let mut json = String::with_capacity(128);
             let _ = write!(
                 json,
-                r#"{{"schema_version":{},"status":"unknown","exit_code":{},"elapsed_ms":{}"#,
-                SCHEMA_VERSION, exit_code, elapsed_ms
+                r#"{{"schema_version":{},"status":"unknown","clock":"{}","exit_code":{},"elapsed_ms":{}"#,
+                SCHEMA_VERSION, clock_str, exit_code, elapsed_ms
             );
             append_attempts(&mut json, attempts, retry_count);
             append_limits(&mut json, limits, cpu_throttle);
@@ -535,8 +574,8 @@ fn print_json_output(
     }
 }
 
-fn print_json_error(err: &darwin_timeout::error::TimeoutError, elapsed_ms: u64) {
-    const SCHEMA_VERSION: u8 = 7;
+fn print_json_error(err: &procguard::error::TimeoutError, elapsed_ms: u64) {
+    const SCHEMA_VERSION: u8 = 8;
 
     let exit_code = err.exit_code();
     /* Escape control characters for valid JSON */

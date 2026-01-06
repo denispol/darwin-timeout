@@ -1,15 +1,15 @@
-# Contributing to darwin-timeout
+# Contributing to procguard
 
 Thank you for your interest in contributing! This guide covers the development workflow and verification requirements.
 
-darwin-timeout is both a **CLI tool** and a **Rust library**. The same codebase powers both—`src/main.rs` is the CLI entry point, `src/lib.rs` exposes the public library API.
+procguard is both a **CLI tool** and a **Rust library**. The same codebase powers both—`src/main.rs` is the CLI entry point, `src/lib.rs` exposes the public library API.
 
 ## Quick Start
 
 ```bash
 # clone and build
-git clone https://github.com/denispol/darwin-timeout.git
-cd darwin-timeout
+git clone https://github.com/denispol/procguard.git
+cd procguard
 cargo build --release
 
 # run all tests (unit, integration, library API)
@@ -85,7 +85,7 @@ CI automatically triggers extra verification based on which files you change. **
 - `cargo fmt --check`
 - `cargo clippy -- -D warnings`
 - `cargo test --lib` (154 unit tests)
-- `cargo test --test integration` (179 tests)
+- `cargo test --test integration` (185 tests)
 - `cargo test --test library_api` (10 tests)
 - `cargo test --test proptest` (30 properties)
 - Binary size check (≤150KB)
@@ -225,7 +225,7 @@ src/
 └── allocator.rs  # thin libc malloc wrapper
 
 tests/
-├── integration.rs   # CLI integration tests (179 tests)
+├── integration.rs   # CLI integration tests (185 tests)
 ├── library_api.rs   # library API tests (10 tests)
 ├── proptest.rs      # property-based tests (30 properties)
 └── benchmarks.rs    # performance benchmarks

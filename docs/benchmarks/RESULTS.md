@@ -1,6 +1,6 @@
 # Benchmark Results
 
-Raw benchmark data for darwin-timeout performance claims.
+Raw benchmark data for procguard performance claims.
 
 ## Test Environment
 
@@ -20,10 +20,10 @@ Full machine specs: [machine_specs.json](machine_specs.json)
 
 | Binary | Mean | Std Dev | Runs |
 |--------|------|---------|------|
-| darwin-timeout | 3.6ms | ±0.2ms | 250 |
+| procguard | 3.6ms | ±0.2ms | 250 |
 | GNU timeout | 4.2ms | ±0.2ms | 250 |
 
-**darwin-timeout is 18% faster** (1.18x)
+**procguard is 18% faster** (1.18x)
 
 Raw data:
 - [run1_startup.json](run1_startup.json)
@@ -38,7 +38,7 @@ Raw data:
 
 | Binary | Mean | Std Dev |
 |--------|------|---------|
-| darwin-timeout | 1.014s | ±0.003s |
+| procguard | 1.014s | ±0.003s |
 | GNU timeout | 1.017s | ±0.001s |
 
 Both implementations are equally precise.
@@ -72,7 +72,7 @@ Raw data: [retry_overhead.json](retry_overhead.json)
 ## Binary Size
 
 ```
-darwin-timeout: ~100KB (101984 bytes)
+procguard: ~100KB (101984 bytes)
 GNU coreutils:  15.7MB
 Ratio:          157x smaller
 ```
@@ -88,6 +88,6 @@ cargo build --release
 
 # Run benchmarks
 hyperfine --warmup 10 -N --runs 50 \
-    -n "darwin-timeout" "./target/release/timeout 1 true" \
+    -n "procguard" "./target/release/timeout 1 true" \
     -n "GNU timeout" "gtimeout 1 true"
 ```

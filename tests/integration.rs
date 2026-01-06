@@ -1,18 +1,29 @@
 /*
- * Integration tests for the timeout CLI.
+ * Integration tests for the procguard CLI.
  *
  * These tests validate GNU coreutils compatibility - we must behave exactly
  * like Linux timeout for scripts to be portable. Each test documents the
  * expected behavior with references to GNU behavior where relevant.
+ *
+ * procguard provides both:
+ * - `procguard`: primary binary (wall-clock default)
+ * - `timeout`: GNU-compatible alias (active-time default via argv[0] detection)
  */
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::time::{Duration, Instant};
 
+/* timeout alias - tests mostly use this for GNU compatibility */
 #[allow(deprecated)]
 fn timeout_cmd() -> Command {
     Command::cargo_bin("timeout").unwrap()
+}
+
+/* procguard primary binary */
+#[allow(dead_code, deprecated)]
+fn procguard_cmd() -> Command {
+    Command::cargo_bin("procguard").unwrap()
 }
 
 /* =========================================================================
@@ -594,11 +605,15 @@ fn test_help() {
 
 #[test]
 fn test_version() {
+    /*
+     * Version output shows "procguard" regardless of which binary is invoked.
+     * Both timeout and procguard are the same binary, just different entry names.
+     */
     timeout_cmd()
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("timeout"));
+        .stdout(predicate::str::contains("procguard"));
 }
 
 #[test]
@@ -1609,28 +1624,28 @@ fn test_quiet_verbose_conflict() {
 #[test]
 fn test_json_schema_version() {
     /*
-     * All JSON output should include schema_version field (version 7 with memory limit)
+     * All JSON output should include schema_version field (version 8 with memory limit)
      */
     /* Test completed */
     timeout_cmd()
         .args(["--json", "5s", "true"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""schema_version":7"#));
+        .stdout(predicate::str::contains(r#""schema_version":8"#));
 
     /* Test timeout */
     timeout_cmd()
         .args(["--json", "0.1s", "sleep", "10"])
         .assert()
         .code(124)
-        .stdout(predicate::str::contains(r#""schema_version":7"#));
+        .stdout(predicate::str::contains(r#""schema_version":8"#));
 
     /* Test error */
     timeout_cmd()
         .args(["--json", "5s", "nonexistent_command_xyz_12345"])
         .assert()
         .code(127)
-        .stdout(predicate::str::contains(r#""schema_version":7"#));
+        .stdout(predicate::str::contains(r#""schema_version":8"#));
 }
 
 #[test]
@@ -1957,7 +1972,7 @@ fn test_wait_for_file_created_during_wait() {
     use std::fs;
     use std::thread;
 
-    let test_file = "/tmp/darwin_timeout_test_wait_file_integration";
+    let test_file = "/tmp/procguard_test_wait_file_integration";
     let _ = fs::remove_file(test_file);
 
     /* Spawn a thread to create the file after a delay */
@@ -3314,8 +3329,8 @@ fn test_mem_limit_kills_on_exceed() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
-        stdout.contains(r#""schema_version":7"#),
-        "expected schema_version 7: {}",
+        stdout.contains(r#""schema_version":8"#),
+        "expected schema_version 8: {}",
         stdout
     );
     assert!(
@@ -3405,4 +3420,118 @@ fn test_cpu_time_kills_cpu_intensive() {
         code,
         String::from_utf8_lossy(&output.stdout)
     );
+}
+
+/* =========================================================================
+ * DUAL BINARY BEHAVIOR - procguard vs timeout alias
+ * ========================================================================= */
+
+#[test]
+fn test_procguard_defaults_to_wall_clock() {
+    /*
+     * procguard binary should default to --confine wall (sleep-aware).
+     * This is the unique darwin feature - timeout survives system sleep.
+     */
+    let output = procguard_cmd()
+        .args(["--json", "5s", "echo", "test"])
+        .output()
+        .expect("procguard should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    /* wall clock mode is indicated in JSON output */
+    assert!(
+        stdout.contains("\"clock\":\"wall\"") || stdout.contains("\"status\":\"completed\""),
+        "procguard should use wall clock by default: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_timeout_alias_defaults_to_active() {
+    /*
+     * timeout alias should default to --confine active for GNU compatibility.
+     * This matches the behavior of GNU timeout which uses active/monotonic time.
+     */
+    let output = timeout_cmd()
+        .args(["--json", "5s", "true"])
+        .output()
+        .expect("timeout should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    /* active clock mode is indicated in JSON output */
+    assert!(
+        stdout.contains("\"clock\":\"active\""),
+        "timeout alias should use active clock by default: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_timeout_alias_respects_explicit_confine_wall() {
+    /*
+     * Even when invoked as 'timeout', explicit --confine wall should override.
+     */
+    let output = timeout_cmd()
+        .args(["--json", "--confine", "wall", "5s", "true"])
+        .output()
+        .expect("timeout should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"clock\":\"wall\""),
+        "explicit --confine wall should override timeout default: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_procguard_respects_explicit_confine_active() {
+    /*
+     * Even when invoked as 'procguard', explicit --confine active should override.
+     */
+    let output = procguard_cmd()
+        .args(["--json", "--confine", "active", "5s", "true"])
+        .output()
+        .expect("procguard should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"clock\":\"active\""),
+        "explicit --confine active should work on procguard: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_procguard_defaults_to_wall() {
+    /*
+     * procguard should default to --confine wall (wall clock).
+     * This is different from the timeout alias which defaults to active.
+     */
+    let output = procguard_cmd()
+        .args(["--json", "5s", "true"])
+        .output()
+        .expect("procguard should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"clock\":\"wall\""),
+        "procguard should use wall clock by default: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_procguard_version_shows_procguard() {
+    /*
+     * Version output should show "procguard" as the program name.
+     */
+    procguard_cmd()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("procguard"))
+        .stdout(predicate::str::contains(
+            "formally verified process supervisor",
+        ));
 }

@@ -1,7 +1,7 @@
 /*
  * build.rs
  *
- * Build script for darwin-timeout.
+ * Build script for procguard.
  * Ensures libc is linked for the no_std binary.
  */
 

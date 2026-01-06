@@ -1,15 +1,15 @@
 [package]
-name = "darwin-timeout"
+name = "procguard"
 version = "1.4.0"
 edition = "2024"
 rust-version = "1.91"
 authors = ["denispol"]
-description = "Run a command with a time limit (GNU timeout clone for Darwin/Apple platforms)"
+description = "The formally verified process supervisor for macOS. Enforces time limits, memory quotas, and CPU throttling."
 license = "MIT"
-repository = "https://github.com/denispol/darwin-timeout"
+repository = "https://github.com/denispol/procguard"
 readme = "README.md"
-documentation = "https://docs.rs/darwin-timeout"
-keywords = ["cli", "timeout", "process", "macos", "darwin"]
+documentation = "https://docs.rs/procguard"
+keywords = ["cli", "timeout", "process", "macos", "supervisor"]
 categories = ["command-line-utilities", "os::macos-apis"]
 
 # publish allowlist - keep crates.io package small and deterministic
@@ -25,7 +25,7 @@ include = [
 ]
 
 [lib]
-name = "darwin_timeout"
+name = "procguard"
 path = "src/lib.rs"
 
 [dependencies]
@@ -67,6 +67,12 @@ opt-level = 3
 debug-assertions = true
 overflow-checks = true
 
+# Primary binary - wall-clock default
+[[bin]]
+name = "procguard"
+path = "src/main.rs"
+
+# GNU-compatible alias - active-time default (via argv[0] detection)
 [[bin]]
 name = "timeout"
 path = "src/main.rs"

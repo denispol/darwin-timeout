@@ -62,6 +62,25 @@ fn get_args_from_darwin() -> Vec<String> {
     }
 }
 
+/// Get argv[0] (program name) from Darwin's _NSGetArgv.
+/// Used for dual-binary detection: "procguard" vs "timeout" alias.
+pub fn get_argv0() -> Option<String> {
+    // SAFETY: _NSGetArgc/_NSGetArgv always return valid pointers on macOS.
+    #[allow(clippy::multiple_unsafe_ops_per_block)]
+    unsafe {
+        let argc = *_NSGetArgc();
+        if argc < 1 {
+            return None;
+        }
+        let argv = *_NSGetArgv();
+        let arg_ptr = *argv.offset(0);
+        if arg_ptr.is_null() {
+            return None;
+        }
+        Some(CStr::from_ptr(arg_ptr).to_string_lossy().into_owned())
+    }
+}
+
 /// Parsed argument - either borrowed from argv or owned (env var / embedded value)
 #[derive(Debug, Clone)]
 pub enum ArgValue<'a> {
@@ -134,6 +153,7 @@ pub struct Args<'a> {
     pub on_timeout: Option<ArgValue<'a>>,
     pub on_timeout_limit: ArgValue<'a>,
     pub confine: Confine,
+    pub confine_specified: bool, /* true if user explicitly set -c/--confine */
     pub wait_for_file: Option<ArgValue<'a>>,
     pub wait_for_file_timeout: Option<ArgValue<'a>>,
     pub retry: Option<ArgValue<'a>>,
@@ -164,6 +184,7 @@ pub struct OwnedArgs {
     pub on_timeout: Option<String>,
     pub on_timeout_limit: String,
     pub confine: Confine,
+    pub confine_specified: bool, /* true if user explicitly set -c/--confine */
     pub wait_for_file: Option<String>,
     pub wait_for_file_timeout: Option<String>,
     pub retry: Option<String>,
@@ -195,6 +216,7 @@ impl<'a> Args<'a> {
             on_timeout: self.on_timeout.map(|v| v.into_owned()),
             on_timeout_limit: self.on_timeout_limit.into_owned(),
             confine: self.confine,
+            confine_specified: self.confine_specified,
             wait_for_file: self.wait_for_file.map(|v| v.into_owned()),
             wait_for_file_timeout: self.wait_for_file_timeout.map(|v| v.into_owned()),
             retry: self.retry.map(|v| v.into_owned()),
@@ -401,12 +423,14 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                 result.confine = Confine::from_str(val).ok_or_else(|| ParseError {
                     message: format!("invalid confine mode: '{}' (use 'wall' or 'active')", val),
                 })?;
+                result.confine_specified = true;
             }
             s if s.starts_with("--confine=") => {
                 let val = &s[10..];
                 result.confine = Confine::from_str(val).ok_or_else(|| ParseError {
                     message: format!("invalid confine mode: '{}' (use 'wall' or 'active')", val),
                 })?;
+                result.confine_specified = true;
             }
 
             "--wait-for-file" => {
@@ -648,6 +672,7 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                                                 val
                                             ),
                                         })?;
+                                    result.confine_specified = true;
                                     break;
                                 } else {
                                     i += 1;
@@ -661,6 +686,7 @@ pub fn parse_from_slice<'a>(args: &'a [String]) -> Result<Args<'a>, ParseError> 
                                                 val
                                             ),
                                         })?;
+                                    result.confine_specified = true;
                                 }
                             }
                             b'r' => {
@@ -767,18 +793,21 @@ where
 }
 
 fn print_version() {
-    crate::io::print_str("timeout ");
+    crate::io::print_str("procguard ");
     crate::io::print_str(env!("CARGO_PKG_VERSION"));
     crate::io::print_str(
-        "\nCopyright (c) 2025 Alexandre Bouveur\nLicense: MIT <https://opensource.org/licenses/MIT>\n",
+        "\nThe formally verified process supervisor for macOS.\nCopyright (c) 2025 Alexandre Bouveur\nLicense: MIT <https://opensource.org/licenses/MIT>\n",
     );
 }
 
 fn print_help() {
     crate::io::print_str(
-        r#"Usage: timeout [OPTIONS] DURATION COMMAND [ARG]...
+        r#"Usage: procguard [OPTIONS] DURATION COMMAND [ARG]...
 
-Enforce a strict wall-clock deadline on a command (sleep-aware).
+The formally verified process supervisor for macOS.
+Provides timeout enforcement, resource limits, and process lifecycle control.
+
+When invoked as 'timeout' (symlink), defaults to --confine active for GNU compatibility.
 
 Arguments:
   DURATION  Time before sending signal (30, 30s, 100ms, 500us, 1.5m, 2h, 1d)
@@ -791,7 +820,7 @@ Options:
   -p, --preserve-status           Exit with same status as COMMAND, even on timeout
   -f, --foreground                Allow COMMAND to read from TTY and get TTY signals
   -v, --verbose                   Diagnose to stderr any signal sent upon timeout
-  -q, --quiet                     Suppress timeout's own diagnostic output to stderr
+  -q, --quiet                     Suppress procguard's own diagnostic output to stderr
       --timeout-exit-code <CODE>  Exit with CODE instead of 124 when timeout occurs
       --on-timeout <CMD>          Run CMD before sending the timeout signal (%p = PID)
       --on-timeout-limit <DUR>    Timeout for the --on-timeout hook command [default: 5s]
@@ -818,14 +847,17 @@ Options:
       --cpu-percent <PCT>         Throttle CPU to PCT via SIGSTOP/SIGCONT
                                   (100 = 1 core, 400 = 4 cores; low values may stutter)
 
+Aliases:
+  timeout                         GNU-compatible alias (defaults to --confine active)
+
 Exit status:
   124 if COMMAND times out, and --preserve-status is not specified
   124 if --wait-for-file times out
   124 if --stdin-timeout triggers (stdin idle)
-  125 if the timeout command itself fails
+  125 if the procguard command itself fails
   126 if COMMAND is found but cannot be invoked
   127 if COMMAND cannot be found
-  137 if COMMAND (or timeout itself) is sent SIGKILL (128+9)
+  137 if COMMAND (or procguard itself) is sent SIGKILL (128+9)
   the exit status of COMMAND otherwise
 
 Environment:
@@ -847,7 +879,7 @@ mod tests {
 
     #[test]
     fn test_minimal_args() {
-        let args = try_parse_from(["timeout", "5", "sleep", "10"]).unwrap();
+        let args = try_parse_from(["procguard", "5", "sleep", "10"]).unwrap();
         assert_eq!(args.duration, Some("5".to_string()));
         assert_eq!(args.command, Some("sleep".to_string()));
         assert_eq!(args.args, vec!["10"]);
@@ -924,45 +956,45 @@ mod tests {
 
     #[test]
     fn test_quiet_verbose_conflict() {
-        let result = try_parse_from(["timeout", "-q", "-v", "5s", "cmd"]);
+        let result = try_parse_from(["procguard", "-q", "-v", "5s", "cmd"]);
         assert!(result.is_err(), "-q and -v should be mutually exclusive");
     }
 
     #[test]
     fn test_command_with_dashes() {
-        let args = try_parse_from(["timeout", "5", "--", "-c", "echo", "hello"]).unwrap();
+        let args = try_parse_from(["procguard", "5", "--", "-c", "echo", "hello"]).unwrap();
         assert_eq!(args.command, Some("-c".to_string()));
         assert_eq!(args.args, vec!["echo", "hello"]);
     }
 
     #[test]
     fn test_json_flag() {
-        let args = try_parse_from(["timeout", "--json", "5s", "sleep", "1"]).unwrap();
+        let args = try_parse_from(["procguard", "--json", "5s", "sleep", "1"]).unwrap();
         assert!(args.json);
         assert_eq!(args.duration, Some("5s".to_string()));
     }
 
     #[test]
     fn test_quiet_flag() {
-        let args = try_parse_from(["timeout", "-q", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "-q", "5s", "cmd"]).unwrap();
         assert!(args.quiet);
     }
 
     #[test]
     fn test_timeout_exit_code() {
-        let args = try_parse_from(["timeout", "--timeout-exit-code", "99", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "--timeout-exit-code", "99", "5s", "cmd"]).unwrap();
         assert_eq!(args.timeout_exit_code, Some(99));
     }
 
     #[test]
     fn test_on_timeout() {
-        let args = try_parse_from(["timeout", "--on-timeout", "echo %p", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "--on-timeout", "echo %p", "5s", "cmd"]).unwrap();
         assert_eq!(args.on_timeout, Some("echo %p".to_string()));
     }
 
     #[test]
     fn test_short_option_cluster() {
-        let args = try_parse_from(["timeout", "-pfv", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "-pfv", "5s", "cmd"]).unwrap();
         assert!(args.preserve_status);
         assert!(args.foreground);
         assert!(args.verbose);
@@ -984,71 +1016,72 @@ mod tests {
 
     #[test]
     fn test_unknown_option() {
-        let result = try_parse_from(["timeout", "--unknown", "5s", "cmd"]);
+        let result = try_parse_from(["procguard", "--unknown", "5s", "cmd"]);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("unknown option"));
     }
 
     #[test]
     fn test_missing_signal_value() {
-        let result = try_parse_from(["timeout", "-s"]);
+        let result = try_parse_from(["procguard", "-s"]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_confine_wall() {
-        let args = try_parse_from(["timeout", "--confine=wall", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "--confine=wall", "5s", "cmd"]).unwrap();
         assert_eq!(args.confine, Confine::Wall);
     }
 
     #[test]
     fn test_confine_active() {
-        let args = try_parse_from(["timeout", "--confine=active", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "--confine=active", "5s", "cmd"]).unwrap();
         assert_eq!(args.confine, Confine::Active);
     }
 
     #[test]
     fn test_confine_default() {
-        let args = try_parse_from(["timeout", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "5s", "cmd"]).unwrap();
         assert_eq!(args.confine, Confine::Wall); // default
     }
 
     #[test]
     fn test_confine_invalid() {
-        let result = try_parse_from(["timeout", "--confine=invalid", "5s", "cmd"]);
+        let result = try_parse_from(["procguard", "--confine=invalid", "5s", "cmd"]);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("invalid confine mode"));
     }
 
     #[test]
     fn test_confine_case_insensitive() {
-        let args = try_parse_from(["timeout", "--confine=ACTIVE", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "--confine=ACTIVE", "5s", "cmd"]).unwrap();
         assert_eq!(args.confine, Confine::Active);
     }
 
     #[test]
     fn test_confine_short_flag() {
-        let args = try_parse_from(["timeout", "-c", "active", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "-c", "active", "5s", "cmd"]).unwrap();
         assert_eq!(args.confine, Confine::Active);
     }
 
     #[test]
     fn test_confine_short_flag_embedded() {
-        let args = try_parse_from(["timeout", "-cwall", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "-cwall", "5s", "cmd"]).unwrap();
         assert_eq!(args.confine, Confine::Wall);
     }
 
     #[test]
     fn test_wait_for_file() {
         let args =
-            try_parse_from(["timeout", "--wait-for-file", "/tmp/ready", "5s", "cmd"]).unwrap();
+            try_parse_from(["procguard", "--wait-for-file", "/tmp/ready", "5s", "cmd"]).unwrap();
         assert_eq!(args.wait_for_file, Some("/tmp/ready".to_string()));
         assert!(args.wait_for_file_timeout.is_none());
     }
 
     #[test]
     fn test_wait_for_file_equals_syntax() {
-        let args = try_parse_from(["timeout", "--wait-for-file=/tmp/ready", "5s", "cmd"]).unwrap();
+        let args =
+            try_parse_from(["procguard", "--wait-for-file=/tmp/ready", "5s", "cmd"]).unwrap();
         assert_eq!(args.wait_for_file, Some("/tmp/ready".to_string()));
     }
 
@@ -1084,14 +1117,14 @@ mod tests {
 
     #[test]
     fn test_wait_for_file_missing_path() {
-        let result = try_parse_from(["timeout", "--wait-for-file"]);
+        let result = try_parse_from(["procguard", "--wait-for-file"]);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("requires a path"));
     }
 
     #[test]
     fn test_wait_for_file_timeout_missing_duration() {
-        let result = try_parse_from(["timeout", "--wait-for-file-timeout"]);
+        let result = try_parse_from(["procguard", "--wait-for-file-timeout"]);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("requires a duration"));
     }
@@ -1100,19 +1133,19 @@ mod tests {
 
     #[test]
     fn test_retry_short_flag() {
-        let args = try_parse_from(["timeout", "-r", "3", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "-r", "3", "5s", "cmd"]).unwrap();
         assert_eq!(args.retry, Some("3".to_string()));
     }
 
     #[test]
     fn test_retry_long_flag() {
-        let args = try_parse_from(["timeout", "--retry", "5", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "--retry", "5", "5s", "cmd"]).unwrap();
         assert_eq!(args.retry, Some("5".to_string()));
     }
 
     #[test]
     fn test_retry_equals_syntax() {
-        let args = try_parse_from(["timeout", "--retry=2", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "--retry=2", "5s", "cmd"]).unwrap();
         assert_eq!(args.retry, Some("2".to_string()));
     }
 
@@ -1135,7 +1168,7 @@ mod tests {
     #[test]
     fn test_retry_delay_equals_syntax() {
         let args =
-            try_parse_from(["timeout", "--retry=3", "--retry-delay=500ms", "5s", "cmd"]).unwrap();
+            try_parse_from(["procguard", "--retry=3", "--retry-delay=500ms", "5s", "cmd"]).unwrap();
         assert_eq!(args.retry, Some("3".to_string()));
         assert_eq!(args.retry_delay, Some("500ms".to_string()));
     }
@@ -1178,28 +1211,28 @@ mod tests {
     #[test]
     fn test_retry_with_short_r() {
         let args =
-            try_parse_from(["timeout", "-r", "2", "--retry-delay", "1s", "5s", "cmd"]).unwrap();
+            try_parse_from(["procguard", "-r", "2", "--retry-delay", "1s", "5s", "cmd"]).unwrap();
         assert_eq!(args.retry, Some("2".to_string()));
         assert_eq!(args.retry_delay, Some("1s".to_string()));
     }
 
     #[test]
     fn test_retry_missing_count() {
-        let result = try_parse_from(["timeout", "--retry"]);
+        let result = try_parse_from(["procguard", "--retry"]);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("requires a count"));
     }
 
     #[test]
     fn test_retry_delay_missing_duration() {
-        let result = try_parse_from(["timeout", "--retry-delay"]);
+        let result = try_parse_from(["procguard", "--retry-delay"]);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("requires a duration"));
     }
 
     #[test]
     fn test_retry_backoff_missing_multiplier() {
-        let result = try_parse_from(["timeout", "--retry-backoff"]);
+        let result = try_parse_from(["procguard", "--retry-backoff"]);
         assert!(result.is_err());
         assert!(
             result
@@ -1236,40 +1269,48 @@ mod tests {
 
     #[test]
     fn test_heartbeat_long_flag() {
-        let args = try_parse_from(["timeout", "--heartbeat", "60s", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "--heartbeat", "60s", "5s", "cmd"]).unwrap();
         assert_eq!(args.heartbeat, Some("60s".to_string()));
     }
 
     #[test]
     fn test_heartbeat_short_flag() {
-        let args = try_parse_from(["timeout", "-H", "30s", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "-H", "30s", "5s", "cmd"]).unwrap();
         assert_eq!(args.heartbeat, Some("30s".to_string()));
     }
 
     #[test]
     fn test_heartbeat_equals_syntax() {
-        let args = try_parse_from(["timeout", "--heartbeat=1m", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "--heartbeat=1m", "5s", "cmd"]).unwrap();
         assert_eq!(args.heartbeat, Some("1m".to_string()));
     }
 
     #[test]
     fn test_heartbeat_missing_duration() {
-        let result = try_parse_from(["timeout", "--heartbeat"]);
+        let result = try_parse_from(["procguard", "--heartbeat"]);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("requires a duration"));
     }
 
     #[test]
     fn test_heartbeat_short_flag_missing_duration() {
-        let result = try_parse_from(["timeout", "-H"]);
+        let result = try_parse_from(["procguard", "-H"]);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("requires a duration"));
     }
 
     #[test]
     fn test_heartbeat_combined_with_other_flags() {
-        let args =
-            try_parse_from(["timeout", "-v", "--json", "--heartbeat", "60s", "5m", "cmd"]).unwrap();
+        let args = try_parse_from([
+            "procguard",
+            "-v",
+            "--json",
+            "--heartbeat",
+            "60s",
+            "5m",
+            "cmd",
+        ])
+        .unwrap();
         assert!(args.verbose);
         assert!(args.json);
         assert_eq!(args.heartbeat, Some("60s".to_string()));
@@ -1278,7 +1319,7 @@ mod tests {
 
     #[test]
     fn test_heartbeat_short_flag_embedded() {
-        let args = try_parse_from(["timeout", "-H30s", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "-H30s", "5s", "cmd"]).unwrap();
         assert_eq!(args.heartbeat, Some("30s".to_string()));
     }
 
@@ -1286,7 +1327,7 @@ mod tests {
 
     #[test]
     fn test_stdin_timeout_long_flag() {
-        let args = try_parse_from(["timeout", "--stdin-timeout", "30s", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "--stdin-timeout", "30s", "5s", "cmd"]).unwrap();
         assert_eq!(args.stdin_timeout, Some("30s".to_string()));
     }
 
@@ -1308,13 +1349,13 @@ mod tests {
 
     #[test]
     fn test_stdin_timeout_equals_syntax() {
-        let args = try_parse_from(["timeout", "--stdin-timeout=1m", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "--stdin-timeout=1m", "5s", "cmd"]).unwrap();
         assert_eq!(args.stdin_timeout, Some("1m".to_string()));
     }
 
     #[test]
     fn test_stdin_timeout_missing_duration() {
-        let result = try_parse_from(["timeout", "--stdin-timeout"]);
+        let result = try_parse_from(["procguard", "--stdin-timeout"]);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("requires a duration"));
     }
@@ -1339,26 +1380,26 @@ mod tests {
 
     #[test]
     fn test_stdin_timeout_with_main_timeout() {
-        let args = try_parse_from(["timeout", "--stdin-timeout", "30s", "5m", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "--stdin-timeout", "30s", "5m", "cmd"]).unwrap();
         assert_eq!(args.stdin_timeout, Some("30s".to_string()));
         assert_eq!(args.duration, Some("5m".to_string()));
     }
 
     #[test]
     fn test_stdin_timeout_short_flag() {
-        let args = try_parse_from(["timeout", "-S", "30s", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "-S", "30s", "5s", "cmd"]).unwrap();
         assert_eq!(args.stdin_timeout, Some("30s".to_string()));
     }
 
     #[test]
     fn test_stdin_timeout_short_flag_embedded() {
-        let args = try_parse_from(["timeout", "-S30s", "5s", "cmd"]).unwrap();
+        let args = try_parse_from(["procguard", "-S30s", "5s", "cmd"]).unwrap();
         assert_eq!(args.stdin_timeout, Some("30s".to_string()));
     }
 
     #[test]
     fn test_stdin_timeout_short_flag_missing_duration() {
-        let result = try_parse_from(["timeout", "-S"]);
+        let result = try_parse_from(["procguard", "-S"]);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("requires a duration"));
     }

@@ -5,9 +5,9 @@
  * use std for better error messages and easier debugging.
  */
 
-//! # darwin-timeout
+//! # procguard
 //!
-//! A native macOS/Darwin implementation of the GNU timeout command.
+//! The formally verified process supervisor for macOS.
 //!
 //! This crate provides both a CLI binary and a library for running commands
 //! with time limits on macOS. It uses Darwin-specific APIs (`mach_continuous_time`,
@@ -23,7 +23,7 @@
 //! The primary entry points are [`run_command`] and [`run_with_retry`]:
 //!
 //! ```ignore
-//! use darwin_timeout::{RunConfig, RunResult, Signal, run_command, setup_signal_forwarding};
+//! use procguard::{RunConfig, RunResult, Signal, run_command, setup_signal_forwarding};
 //! use std::time::Duration;
 //!
 //! // Set up signal forwarding (optional but recommended)
@@ -57,7 +57,7 @@
 //! Helper functions for parsing duration and signal specifications:
 //!
 //! ```rust
-//! use darwin_timeout::{parse_duration, parse_signal, signal::Signal};
+//! use procguard::{parse_duration, parse_signal, signal::Signal};
 //! use core::time::Duration;
 //!
 //! // Parse duration strings
@@ -90,7 +90,7 @@
 
 /* fail fast on unsupported platforms - darwin APIs required */
 #[cfg(not(target_os = "macos"))]
-compile_error!("darwin-timeout requires macOS (iOS support planned for future release)");
+compile_error!("procguard requires macOS (iOS support planned for future release)");
 
 extern crate alloc;
 

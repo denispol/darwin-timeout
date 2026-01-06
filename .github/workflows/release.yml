@@ -1,4 +1,4 @@
-# Release workflow for darwin-timeout.
+# Release workflow for procguard.
 #
 # Triggered when a version tag (v*) is pushed. Builds binaries for all
 # platforms and creates a GitHub release.

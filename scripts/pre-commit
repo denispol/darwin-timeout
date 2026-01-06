@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# pre-commit hook for darwin-timeout
+# pre-commit hook for procguard
 #
 # runs fast checks before commit: fmt + clippy only.
 # full tests run in CI (too slow for pre-commit).
