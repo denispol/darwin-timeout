@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# pre-push hook for darwin-timeout
+# pre-push hook for procguard
 #
 # runs full validation before push: fmt + clippy + quick tests.
 # slower than pre-commit, but catches more issues before CI.

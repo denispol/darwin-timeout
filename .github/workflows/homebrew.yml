@@ -14,7 +14,7 @@ jobs:
       - name: Get SHA256 of universal binary
         id: sha
         run: |
-          URL="https://github.com/denispol/darwin-timeout/releases/download/${{ github.ref_name }}/timeout-macos-universal.tar.gz"
+          URL="https://github.com/denispol/procguard/releases/download/${{ github.ref_name }}/procguard-macos-universal.tar.gz"
           SHA=$(curl -sL "$URL" | shasum -a 256 | cut -d' ' -f1)
           echo "sha256=$SHA" >> $GITHUB_OUTPUT
           echo "SHA256: $SHA"

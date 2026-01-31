@@ -14,6 +14,6 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = core::str::from_utf8(data) {
         /* parse_signal must not panic on any valid UTF-8 string */
-        let _ = darwin_timeout::signal::parse_signal(s);
+        let _ = procguard::signal::parse_signal(s);
     }
 });

@@ -15,6 +15,6 @@ fuzz_target!(|data: &[u8]| {
     /* convert to str - invalid UTF-8 should be handled gracefully */
     if let Ok(s) = core::str::from_utf8(data) {
         /* parse_duration must not panic on any valid UTF-8 string */
-        let _ = darwin_timeout::duration::parse_duration(s);
+        let _ = procguard::duration::parse_duration(s);
     }
 });

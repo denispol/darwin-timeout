@@ -19,7 +19,7 @@ use crate::error::{Result, TimeoutError};
 /// # Examples
 ///
 /// ```
-/// use darwin_timeout::duration::parse_duration;
+/// use procguard::duration::parse_duration;
 /// use std::time::Duration;
 ///
 /// assert_eq!(parse_duration("30").unwrap(), Duration::from_secs(30));

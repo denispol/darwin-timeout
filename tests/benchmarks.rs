@@ -22,7 +22,15 @@
 use assert_cmd::Command;
 use std::time::{Duration, Instant};
 
-#[allow(deprecated)]
+/* get the timeout binary path as a string */
+#[allow(dead_code, deprecated)] /* cargo_bin deprecated but cargo_bin! requires nightly */
+fn timeout_bin_path() -> String {
+    assert_cmd::cargo::cargo_bin("timeout")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[allow(deprecated)] /* cargo_bin deprecated but cargo_bin! requires nightly */
 fn timeout_cmd() -> Command {
     Command::cargo_bin("timeout").unwrap()
 }
@@ -32,7 +40,7 @@ fn timeout_cmd() -> Command {
  * ========================================================================= */
 
 #[test]
-fn bench_startup_overhead() {
+fn test_startup_overhead() {
     /*
      * Run 'true' (does nothing, exits immediately) through timeout.
      * This measures our startup + teardown overhead.
@@ -894,7 +902,7 @@ fn bench_stdin_timeout_triggers() {
     let max_allowed = Duration::from_millis(500);
 
     let start = Instant::now();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args(["--stdin-timeout", "100ms", "60s", "sleep", "60"])
         .stdin(Stdio::piped())
         .spawn()

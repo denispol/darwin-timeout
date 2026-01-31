@@ -12,10 +12,10 @@ Output is a single JSON object on stdout. The command's own stdout/stderr pass t
 
 ## Schema Version
 
-All JSON output includes a `schema_version` field. The current version is **7**.
+All JSON output includes a `schema_version` field. The current version is **8**.
 
 ```json
-{"schema_version":7,"status":"completed",...}
+{"schema_version":8,"status":"completed",...}
 ```
 
 Schema changes:
@@ -27,18 +27,19 @@ Schema changes:
 - **v5**: Added `timeout_reason` field to distinguish timeout types (`wall_clock` vs `stdin_idle`)
 - **v6**: Added `limits` object describing configured resource limits
 - **v7**: Added `memory_limit` status (`limit_bytes`, `actual_bytes`)
+- **v8**: Added `clock` field for time measurement mode (`wall` vs `active`)
 
 ## Status Types
 
 The `status` field indicates what happened:
 
-| Status | Meaning |
-|--------|---------|
-| `completed` | Command finished before timeout |
-| `timeout` | Command was killed due to timeout |
-| `memory_limit` | Command exceeded `--mem-limit` |
+| Status             | Meaning                                                                         |
+| ------------------ | ------------------------------------------------------------------------------- |
+| `completed`        | Command finished before timeout                                                 |
+| `timeout`          | Command was killed due to timeout                                               |
+| `memory_limit`     | Command exceeded `--mem-limit`                                                  |
 | `signal_forwarded` | timeout received a signal (SIGTERM/SIGINT/SIGHUP) and forwarded it to the child |
-| `error` | timeout itself failed (command not found, permission denied, etc.) |
+| `error`            | timeout itself failed (command not found, permission denied, etc.)              |
 
 ## Response Formats
 
@@ -48,8 +49,9 @@ Command finished normally before the timeout.
 
 ```json
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "completed",
+  "clock": "wall",
   "exit_code": 0,
   "elapsed_ms": 1523,
   "user_time_ms": 45,
@@ -58,15 +60,16 @@ Command finished normally before the timeout.
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 7) |
-| `status` | string | Always `"completed"` |
-| `exit_code` | integer | Command's exit code (0-255) |
-| `elapsed_ms` | integer | Wall-clock time in milliseconds |
-| `user_time_ms` | integer | User CPU time in milliseconds |
-| `system_time_ms` | integer | System (kernel) CPU time in milliseconds |
-| `max_rss_kb` | integer | Peak memory usage in kilobytes |
+| Field            | Type    | Description                                                    |
+| ---------------- | ------- | -------------------------------------------------------------- |
+| `schema_version` | integer | Schema version (currently 8)                                   |
+| `status`         | string  | Always `"completed"`                                           |
+| `clock`          | string  | Time measurement mode: `"wall"` (default) or `"active"`        |
+| `exit_code`      | integer | Command's exit code (0-255)                                    |
+| `elapsed_ms`     | integer | Elapsed time in milliseconds (wall or active based on `clock`) |
+| `user_time_ms`   | integer | User CPU time in milliseconds                                  |
+| `system_time_ms` | integer | System (kernel) CPU time in milliseconds                       |
+| `max_rss_kb`     | integer | Peak memory usage in kilobytes                                 |
 
 ### timeout
 
@@ -74,8 +77,9 @@ Command was killed because it exceeded the time limit.
 
 ```json
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "timeout",
+  "clock": "wall",
   "timeout_reason": "wall_clock",
   "signal": "SIGTERM",
   "signal_num": 15,
@@ -89,20 +93,20 @@ Command was killed because it exceeded the time limit.
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 7) |
-| `status` | string | Always `"timeout"` |
-| `timeout_reason` | string | Why timeout occurred: `"wall_clock"` (main timeout) or `"stdin_idle"` (stdin timeout via `-S`) |
-| `signal` | string | Signal sent to command (e.g., `"SIGTERM"`, `"SIGKILL"`) |
-| `signal_num` | integer | Signal number (e.g., 15 for SIGTERM, 9 for SIGKILL) |
-| `killed` | boolean | `true` if escalated to SIGKILL via `--kill-after` |
-| `command_exit_code` | integer | Command's exit code, or -1 if killed by signal |
-| `exit_code` | integer | timeout's exit code (124 by default, or custom via `--timeout-exit-code`) |
-| `elapsed_ms` | integer | Wall-clock time in milliseconds |
-| `user_time_ms` | integer | User CPU time in milliseconds |
-| `system_time_ms` | integer | System (kernel) CPU time in milliseconds |
-| `max_rss_kb` | integer | Peak memory usage in kilobytes |
+| Field               | Type    | Description                                                                                    |
+| ------------------- | ------- | ---------------------------------------------------------------------------------------------- |
+| `schema_version`    | integer | Schema version (currently 8)                                                                   |
+| `status`            | string  | Always `"timeout"`                                                                             |
+| `timeout_reason`    | string  | Why timeout occurred: `"wall_clock"` (main timeout) or `"stdin_idle"` (stdin timeout via `-S`) |
+| `signal`            | string  | Signal sent to command (e.g., `"SIGTERM"`, `"SIGKILL"`)                                        |
+| `signal_num`        | integer | Signal number (e.g., 15 for SIGTERM, 9 for SIGKILL)                                            |
+| `killed`            | boolean | `true` if escalated to SIGKILL via `--kill-after`                                              |
+| `command_exit_code` | integer | Command's exit code, or -1 if killed by signal                                                 |
+| `exit_code`         | integer | procguard's exit code (124 by default, or custom via `--timeout-exit-code`)                    |
+| `elapsed_ms`        | integer | Wall-clock time in milliseconds                                                                |
+| `user_time_ms`      | integer | User CPU time in milliseconds                                                                  |
+| `system_time_ms`    | integer | System (kernel) CPU time in milliseconds                                                       |
+| `max_rss_kb`        | integer | Peak memory usage in kilobytes                                                                 |
 
 #### Stdin Idle Timeout
 
@@ -110,8 +114,9 @@ When using `-S/--stdin-timeout`, a timeout can occur due to stdin inactivity:
 
 ```json
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "timeout",
+  "clock": "wall",
   "timeout_reason": "stdin_idle",
   "signal": "SIGTERM",
   "signal_num": 15,
@@ -142,8 +147,9 @@ When `--on-timeout` is specified, additional fields describe the hook execution:
 
 ```json
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "timeout",
+  "clock": "wall",
   "timeout_reason": "wall_clock",
   "signal": "SIGTERM",
   "signal_num": 15,
@@ -161,12 +167,12 @@ When `--on-timeout` is specified, additional fields describe the hook execution:
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `hook_ran` | boolean | Whether the hook was executed |
-| `hook_exit_code` | integer \| null | Hook's exit code, or `null` if timed out or failed to start |
-| `hook_timed_out` | boolean | Whether the hook exceeded `--on-timeout-limit` |
-| `hook_elapsed_ms` | integer | How long the hook ran in milliseconds |
+| Field             | Type            | Description                                                 |
+| ----------------- | --------------- | ----------------------------------------------------------- |
+| `hook_ran`        | boolean         | Whether the hook was executed                               |
+| `hook_exit_code`  | integer \| null | Hook's exit code, or `null` if timed out or failed to start |
+| `hook_timed_out`  | boolean         | Whether the hook exceeded `--on-timeout-limit`              |
+| `hook_elapsed_ms` | integer         | How long the hook ran in milliseconds                       |
 
 #### With --retry
 
@@ -174,8 +180,9 @@ When `--retry N` is specified (N > 0), additional fields track retry attempts:
 
 ```json
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "completed",
+  "clock": "wall",
   "exit_code": 0,
   "elapsed_ms": 45000,
   "user_time_ms": 100,
@@ -183,36 +190,37 @@ When `--retry N` is specified (N > 0), additional fields track retry attempts:
   "max_rss_kb": 8432,
   "attempts": 3,
   "attempt_results": [
-    {"status": "timeout", "exit_code": null, "elapsed_ms": 30000},
-    {"status": "timeout", "exit_code": null, "elapsed_ms": 30000},
-    {"status": "completed", "exit_code": 0, "elapsed_ms": 15000}
+    { "status": "timeout", "exit_code": null, "elapsed_ms": 30000 },
+    { "status": "timeout", "exit_code": null, "elapsed_ms": 30000 },
+    { "status": "completed", "exit_code": 0, "elapsed_ms": 15000 }
   ]
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `attempts` | integer | Total number of attempts made |
-| `attempt_results` | array | Per-attempt results (see below) |
+| Field             | Type    | Description                     |
+| ----------------- | ------- | ------------------------------- |
+| `attempts`        | integer | Total number of attempts made   |
+| `attempt_results` | array   | Per-attempt results (see below) |
 
 Each element in `attempt_results` contains:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | string | `"completed"`, `"timeout"`, or `"signal_forwarded"` |
-| `exit_code` | integer \| null | Exit code for this attempt, or `null` if timed out |
-| `elapsed_ms` | integer | Duration of this attempt in milliseconds |
+| Field        | Type            | Description                                         |
+| ------------ | --------------- | --------------------------------------------------- |
+| `status`     | string          | `"completed"`, `"timeout"`, or `"signal_forwarded"` |
+| `exit_code`  | integer \| null | Exit code for this attempt, or `null` if timed out  |
+| `elapsed_ms` | integer         | Duration of this attempt in milliseconds            |
 
 **Note:** `attempts` and `attempt_results` fields are only present when `--retry N` is specified with N > 0.
 
 ### signal_forwarded
 
-timeout received a signal (e.g., from `docker stop`, `kill`, or Ctrl+C) and forwarded it to the child process.
+procguard received a signal (e.g., from `docker stop`, `kill`, or Ctrl+C) and forwarded it to the child process.
 
 ```json
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "signal_forwarded",
+  "clock": "wall",
   "signal": "SIGTERM",
   "signal_num": 15,
   "command_exit_code": 143,
@@ -224,18 +232,19 @@ timeout received a signal (e.g., from `docker stop`, `kill`, or Ctrl+C) and forw
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 7) |
-| `status` | string | Always `"signal_forwarded"` |
-| `signal` | string | Signal that was forwarded |
-| `signal_num` | integer | Signal number |
-| `command_exit_code` | integer | Command's exit code after receiving the signal |
-| `exit_code` | integer | timeout's exit code (usually 128 + signal number) |
-| `elapsed_ms` | integer | Wall-clock time in milliseconds |
-| `user_time_ms` | integer | User CPU time in milliseconds |
-| `system_time_ms` | integer | System (kernel) CPU time in milliseconds |
-| `max_rss_kb` | integer | Peak memory usage in kilobytes |
+| Field               | Type    | Description                                         |
+| ------------------- | ------- | --------------------------------------------------- |
+| `schema_version`    | integer | Schema version (currently 8)                        |
+| `status`            | string  | Always `"signal_forwarded"`                         |
+| `clock`             | string  | Time measurement mode: `"wall"` or `"active"`       |
+| `signal`            | string  | Signal that was forwarded                           |
+| `signal_num`        | integer | Signal number                                       |
+| `command_exit_code` | integer | Command's exit code after receiving the signal      |
+| `exit_code`         | integer | procguard's exit code (usually 128 + signal number) |
+| `elapsed_ms`        | integer | Wall-clock time in milliseconds                     |
+| `user_time_ms`      | integer | User CPU time in milliseconds                       |
+| `system_time_ms`    | integer | System (kernel) CPU time in milliseconds            |
+| `max_rss_kb`        | integer | Peak memory usage in kilobytes                      |
 
 ### memory_limit
 
@@ -243,8 +252,9 @@ Command was killed because it exceeded `--mem-limit`.
 
 ```json
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "memory_limit",
+  "clock": "wall",
   "signal": "SIGKILL",
   "signal_num": 9,
   "killed": true,
@@ -261,11 +271,11 @@ Command was killed because it exceeded `--mem-limit`.
 
 ### error
 
-timeout itself encountered an error.
+procguard itself encountered an error.
 
 ```json
 {
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "error",
   "error": "command not found: nonexistent_cmd",
   "exit_code": 127,
@@ -273,13 +283,13 @@ timeout itself encountered an error.
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `schema_version` | integer | Schema version (currently 7) |
-| `status` | string | Always `"error"` |
-| `error` | string | Human-readable error message |
-| `exit_code` | integer | Exit code (125=internal error, 126=not executable, 127=not found) |
-| `elapsed_ms` | integer | Wall-clock time in milliseconds |
+| Field            | Type    | Description                                                       |
+| ---------------- | ------- | ----------------------------------------------------------------- |
+| `schema_version` | integer | Schema version (currently 8)                                      |
+| `status`         | string  | Always `"error"`                                                  |
+| `error`          | string  | Human-readable error message                                      |
+| `exit_code`      | integer | Exit code (125=internal error, 126=not executable, 127=not found) |
+| `elapsed_ms`     | integer | Wall-clock time in milliseconds                                   |
 
 Note: Error responses do **not** include resource usage fields since the command may not have started.
 
@@ -287,11 +297,11 @@ Note: Error responses do **not** include resource usage fields since the command
 
 Schema v3 added resource usage fields from the underlying `wait4()` syscall:
 
-| Field | Description | Notes |
-|-------|-------------|-------|
-| `user_time_ms` | CPU time spent in user mode | Time the command spent executing application code |
+| Field            | Description                   | Notes                                                     |
+| ---------------- | ----------------------------- | --------------------------------------------------------- |
+| `user_time_ms`   | CPU time spent in user mode   | Time the command spent executing application code         |
 | `system_time_ms` | CPU time spent in kernel mode | Time spent in system calls (I/O, memory allocation, etc.) |
-| `max_rss_kb` | Peak resident set size | Maximum physical memory used, in kilobytes |
+| `max_rss_kb`     | Peak resident set size        | Maximum physical memory used, in kilobytes                |
 
 ### Precision Notes
 
@@ -304,7 +314,7 @@ Schema v3 added resource usage fields from the underlying `wait4()` syscall:
 **CPU-bound process:**
 
 ```json
-{"user_time_ms": 4500, "system_time_ms": 100, "elapsed_ms": 4650}
+{ "user_time_ms": 4500, "system_time_ms": 100, "elapsed_ms": 4650 }
 ```
 
 High user time, low system time, elapsed ≈ user + system = CPU-bound.
@@ -312,7 +322,7 @@ High user time, low system time, elapsed ≈ user + system = CPU-bound.
 **I/O-bound process:**
 
 ```json
-{"user_time_ms": 50, "system_time_ms": 200, "elapsed_ms": 5000}
+{ "user_time_ms": 50, "system_time_ms": 200, "elapsed_ms": 5000 }
 ```
 
 Low CPU times but high elapsed = waiting on I/O.
@@ -320,7 +330,7 @@ Low CPU times but high elapsed = waiting on I/O.
 **Memory-intensive process:**
 
 ```json
-{"max_rss_kb": 524288}
+{ "max_rss_kb": 524288 }
 ```
 
 512 MB peak memory usage.

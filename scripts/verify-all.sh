@@ -16,7 +16,7 @@ if [[ "$1" == "--quick" ]]; then
     QUICK=true
 fi
 
-echo "=== darwin-timeout verification suite ==="
+echo "=== procguard verification suite ==="
 echo ""
 
 # static analysis

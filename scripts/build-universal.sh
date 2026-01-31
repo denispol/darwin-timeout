@@ -16,7 +16,8 @@
 #   ./scripts/build-universal.sh --minimal # nightly build-std (~~100KB universal)
 #
 # Output:
-#   target/universal/timeout - The universal binary
+#   target/universal/procguard - The universal binary
+#   target/universal/timeout   - Symlink to procguard
 #
 
 set -euo pipefail
@@ -32,7 +33,7 @@ if [[ "${1:-}" == "--minimal" ]]; then
     MINIMAL=true
 fi
 
-echo "=== Building timeout universal binary ==="
+echo "=== Building procguard universal binary ==="
 if $MINIMAL; then
     echo "    Mode: minimal (nightly + build-std)"
 else
@@ -98,17 +99,20 @@ mkdir -p target/universal
 # Combine with lipo
 echo "Creating universal binary with lipo..."
 lipo -create \
-    target/aarch64-apple-darwin/release/timeout \
-    target/x86_64-apple-darwin/release/timeout \
-    -output target/universal/timeout
+    target/aarch64-apple-darwin/release/procguard \
+    target/x86_64-apple-darwin/release/procguard \
+    -output target/universal/procguard
 
 # aggressive strip: -x removes local symbols, -S removes debug symbols
 # (release profile already strips, this catches anything lipo preserved)
-strip -x -S target/universal/timeout 2>/dev/null || true
+strip -x -S target/universal/procguard 2>/dev/null || true
 
 # Optional: ad-hoc codesign for faster first launch
 echo "Signing binary..."
-codesign -s - target/universal/timeout 2>/dev/null || true
+codesign -s - target/universal/procguard 2>/dev/null || true
+
+# Create timeout symlink for GNU compatibility
+ln -sf procguard target/universal/timeout
 
 echo ""
 echo "=== Build complete ==="
@@ -116,20 +120,23 @@ echo ""
 
 # Show results
 echo "Binary info:"
-file target/universal/timeout
+file target/universal/procguard
 echo ""
 
 echo "Size:"
-ls -lh target/universal/timeout
+ls -lh target/universal/procguard
 echo ""
 
 echo "Architectures:"
-lipo -info target/universal/timeout
+lipo -info target/universal/procguard
 echo ""
 
 # Quick sanity test
 echo "Sanity test:"
+target/universal/procguard --version
 target/universal/timeout --version
 echo ""
 
-echo "Universal binary available at: target/universal/timeout"
+echo "Universal binaries available at:"
+echo "  target/universal/procguard (primary)"
+echo "  target/universal/timeout (GNU-compatible symlink)"

@@ -1,20 +1,20 @@
 /*
  * library_api.rs
  *
- * integration-style tests exercising darwin-timeout as a library.
+ * integration-style tests exercising procguard as a library.
  *
  * goal: ensure the public API is usable without shelling out to the CLI.
  */
 
 use std::time::Duration;
 
-use darwin_timeout::error::exit_codes;
-use darwin_timeout::runner::{
+use procguard::error::exit_codes;
+use procguard::runner::{
     RunConfig, RunResult, cleanup_signal_forwarding, run_command, run_with_retry,
     setup_signal_forwarding,
 };
-use darwin_timeout::signal::Signal;
-use darwin_timeout::{TimeoutReason, parse_duration, parse_signal};
+use procguard::signal::Signal;
+use procguard::{TimeoutReason, parse_duration, parse_signal};
 
 fn basic_config(timeout: Duration) -> RunConfig {
     RunConfig {

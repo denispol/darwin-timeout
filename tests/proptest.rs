@@ -8,9 +8,9 @@
 use proptest::prelude::*;
 use std::time::Duration;
 
-use darwin_timeout::duration::parse_duration;
-use darwin_timeout::rlimit::parse_mem_limit;
-use darwin_timeout::signal::{Signal, parse_signal, signal_name};
+use procguard::duration::parse_duration;
+use procguard::rlimit::parse_mem_limit;
+use procguard::signal::{Signal, parse_signal, signal_name};
 
 /* ============================================================================
  * Duration Parsing Properties

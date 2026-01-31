@@ -1,15 +1,15 @@
 [package]
-name = "darwin-timeout"
-version = "1.4.0"
+name = "procguard"
+version = "1.5.0"
 edition = "2024"
 rust-version = "1.91"
 authors = ["denispol"]
-description = "Run a command with a time limit (GNU timeout clone for Darwin/Apple platforms)"
+description = "The formally verified process supervisor for macOS. Enforces time limits, memory quotas, and CPU throttling."
 license = "MIT"
-repository = "https://github.com/denispol/darwin-timeout"
+repository = "https://github.com/denispol/procguard"
 readme = "README.md"
-documentation = "https://docs.rs/darwin-timeout"
-keywords = ["cli", "timeout", "process", "macos", "darwin"]
+documentation = "https://docs.rs/procguard"
+keywords = ["cli", "timeout", "process", "macos", "supervisor"]
 categories = ["command-line-utilities", "os::macos-apis"]
 
 # publish allowlist - keep crates.io package small and deterministic
@@ -25,7 +25,7 @@ include = [
 ]
 
 [lib]
-name = "darwin_timeout"
+name = "procguard"
 path = "src/lib.rs"
 
 [dependencies]
@@ -66,6 +66,14 @@ inherits = "release"
 opt-level = 3
 debug-assertions = true
 overflow-checks = true
+
+# Both binaries share the same source - behavior detected via argv[0] at runtime:
+# - "procguard": defaults to --confine wall (sleep-aware)
+# - "timeout": defaults to --confine active (GNU-compatible)
+# Note: Cargo warns about shared main.rs; this is intentional for cargo install support.
+[[bin]]
+name = "procguard"
+path = "src/main.rs"
 
 [[bin]]
 name = "timeout"

@@ -26,7 +26,7 @@ cargo kani
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         VERIFICATION PYRAMID                                │
-│                            darwin-timeout                                   │
+│                            procguard                                   │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │                              ▲                                              │
@@ -140,7 +140,7 @@ cargo test --test integration
 cargo test --test library_api
 ```
 
-**CLI Integration** (`tests/integration.rs` - 179 tests):
+**CLI Integration** (`tests/integration.rs` - 185 tests):
 - timeout behavior (wall clock, active time)
 - signal forwarding (SIGTERM, SIGKILL, SIGINT)
 - process groups and cleanup
@@ -297,7 +297,7 @@ fuzz/corpus/parse_duration/
 /* fuzz/fuzz_targets/my_target.rs */
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use darwin_timeout::my_function;
+use procguard::my_function;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
@@ -406,7 +406,7 @@ Required for:
 | Method | Count | Result | Executions |
 |--------|-------|--------|------------|
 | Unit tests | 154 | ✓ passing | - |
-| Integration (CLI) | 179 | ✓ passing | - |
+| Integration (CLI) | 185 | ✓ passing | - |
 | Library API | 10 | ✓ passing | - |
 | Proptest | 30 | ✓ passing | ~7500/run |
 | cargo-fuzz | 4 targets | ✓ 0 crashes | ~70M total |

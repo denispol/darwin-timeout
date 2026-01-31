@@ -1,7 +1,7 @@
 {
   "results": [
     {
-      "command": "darwin-timeout",
+      "command": "procguard",
       "mean": 1.0135828,
       "stddev": 0.003232774461116362,
       "median": 1.014322229,

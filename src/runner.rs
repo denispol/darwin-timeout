@@ -568,7 +568,7 @@ fn status_to_exit_code(status: &RawExitStatus) -> u8 {
 /// # Example
 ///
 /// ```ignore
-/// use darwin_timeout::{RunConfig, Signal};
+/// use procguard::{RunConfig, Signal};
 /// use std::time::Duration;
 ///
 /// let config = RunConfig {
