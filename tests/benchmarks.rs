@@ -22,9 +22,39 @@
 use assert_cmd::Command;
 use std::time::{Duration, Instant};
 
+/* helper to get the procguard binary and create timeout symlink if needed */
+#[allow(deprecated)] /* cargo_bin! macro requires nightly, we use stable */
+fn ensure_timeout_symlink() -> std::path::PathBuf {
+    use std::path::PathBuf;
+
+    /* get the procguard binary path from cargo */
+    let procguard_path = assert_cmd::cargo::cargo_bin("procguard");
+
+    /* create timeout symlink next to procguard if it doesn't exist */
+    let mut timeout_path = PathBuf::from(&procguard_path);
+    timeout_path.pop();
+    timeout_path.push("timeout");
+
+    /* create symlink if missing (idempotent) */
+    if !timeout_path.exists() {
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink("procguard", &timeout_path);
+        }
+    }
+
+    timeout_path
+}
+
+/* get the timeout binary path (symlink) as a string  */
+fn timeout_bin_path() -> String {
+    ensure_timeout_symlink().to_string_lossy().into_owned()
+}
+
 #[allow(deprecated)]
 fn timeout_cmd() -> Command {
-    Command::cargo_bin("timeout").unwrap()
+    let timeout_path = ensure_timeout_symlink();
+    Command::new(timeout_path)
 }
 
 /* =========================================================================
@@ -32,7 +62,7 @@ fn timeout_cmd() -> Command {
  * ========================================================================= */
 
 #[test]
-fn bench_startup_overhead() {
+fn test_startup_overhead() {
     /*
      * Run 'true' (does nothing, exits immediately) through timeout.
      * This measures our startup + teardown overhead.
@@ -894,7 +924,7 @@ fn bench_stdin_timeout_triggers() {
     let max_allowed = Duration::from_millis(500);
 
     let start = Instant::now();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args(["--stdin-timeout", "100ms", "60s", "sleep", "60"])
         .stdin(Stdio::piped())
         .spawn()

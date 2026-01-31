@@ -68,13 +68,12 @@ debug-assertions = true
 overflow-checks = true
 
 # Primary binary - wall-clock default
+# The `timeout` alias is created as a symlink during packaging/installation
+# for GNU compatibility. Behavior is detected via argv[0] at runtime:
+# - "procguard": defaults to --confine wall (sleep-aware)
+# - "timeout": defaults to --confine active (GNU-compatible)
 [[bin]]
 name = "procguard"
-path = "src/main.rs"
-
-# GNU-compatible alias - active-time default (via argv[0] detection)
-[[bin]]
-name = "timeout"
 path = "src/main.rs"
 
 [package.metadata.docs.rs]

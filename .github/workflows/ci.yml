@@ -17,7 +17,7 @@ on:
   push:
     branches: [main, dev]
     tags-ignore:
-      - 'v*'
+      - "v*"
   pull_request:
     # run on all PRs, not just main
 
@@ -85,12 +85,15 @@ jobs:
       - name: Verify binary
         run: |
           cargo build --release
+          # create timeout symlink for testing
+          ln -sf procguard target/release/timeout
+          ./target/release/procguard --version
           ./target/release/timeout --version
-          ./target/release/timeout 0.1s sleep 60 || true
+          ./target/release/procguard 0.1s sleep 60 || true
 
       - name: Verify binary size
         run: |
-          SIZE=$(stat -f%z target/release/timeout)
+          SIZE=$(stat -f%z target/release/procguard)
           echo "Binary size: $SIZE bytes ($(($SIZE / 1024))KB)"
           if [ $SIZE -gt 150000 ]; then
             echo "ERROR: Binary too large (>150KB)"
@@ -99,7 +102,7 @@ jobs:
 
       - name: Verify symbol count
         run: |
-          SYMBOLS=$(nm -U target/release/timeout 2>/dev/null | wc -l)
+          SYMBOLS=$(nm -U target/release/procguard 2>/dev/null | wc -l)
           echo "Exported symbols: $SYMBOLS"
           if [ $SYMBOLS -gt 100 ]; then
             echo "ERROR: Too many symbols (>100), check strip settings"

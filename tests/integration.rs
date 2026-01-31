@@ -14,14 +14,44 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::time::{Duration, Instant};
 
+/* helper to get the procguard binary and create timeout symlink if needed */
+#[allow(deprecated)] /* cargo_bin! macro requires nightly, we use stable */
+fn ensure_timeout_symlink() -> std::path::PathBuf {
+    use std::path::PathBuf;
+
+    /* get the procguard binary path from cargo */
+    let procguard_path = assert_cmd::cargo::cargo_bin("procguard");
+
+    /* create timeout symlink next to procguard if it doesn't exist */
+    let mut timeout_path = PathBuf::from(&procguard_path);
+    timeout_path.pop();
+    timeout_path.push("timeout");
+
+    /* create symlink if missing (idempotent) */
+    if !timeout_path.exists() {
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink("procguard", &timeout_path);
+        }
+    }
+
+    timeout_path
+}
+
+/* get the timeout binary path (symlink) as a string  */
+fn timeout_bin_path() -> String {
+    ensure_timeout_symlink().to_string_lossy().into_owned()
+}
+
 /* timeout alias - tests mostly use this for GNU compatibility */
 #[allow(deprecated)]
 fn timeout_cmd() -> Command {
-    Command::cargo_bin("timeout").unwrap()
+    let timeout_path = ensure_timeout_symlink();
+    Command::new(timeout_path)
 }
 
 /* procguard primary binary */
-#[allow(dead_code, deprecated)]
+#[allow(dead_code, deprecated)] /* cargo_bin! macro requires nightly, we use stable */
 fn procguard_cmd() -> Command {
     Command::cargo_bin("procguard").unwrap()
 }
@@ -31,11 +61,7 @@ fn procguard_cmd() -> Command {
  * ========================================================================= */
 
 #[test]
-fn test_command_completes_before_timeout() {
-    /*
-     * When command finishes before timeout, we should exit immediately
-     * with the command's exit status. No waiting around.
-     */
+fn test_basic_timeout() {
     let start = Instant::now();
 
     timeout_cmd()
@@ -831,7 +857,7 @@ fn test_stdin_passthrough_times_out_on_idle() {
     use std::process::{Command, Stdio};
     use std::thread;
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = Command::new(timeout_bin_path().as_str())
         .args([
             "--stdin-timeout",
             "0.2s",
@@ -870,7 +896,7 @@ fn test_stdin_passthrough_eof_no_false_timeout() {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = Command::new(timeout_bin_path().as_str())
         .args([
             "--stdin-timeout",
             "0.2s",
@@ -1137,7 +1163,7 @@ fn test_signal_forwarding_sigterm() {
     use std::thread;
 
     /* Start timeout with a long-running command */
-    let mut timeout_process = Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut timeout_process = Command::new(timeout_bin_path().as_str())
         .args(["60s", "sleep", "60"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1187,7 +1213,7 @@ fn test_signal_forwarding_sigint() {
     use std::process::{Command, Stdio};
     use std::thread;
 
-    let mut timeout_process = Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut timeout_process = Command::new(timeout_bin_path().as_str())
         .args(["60s", "sleep", "60"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1839,7 +1865,7 @@ fn test_signal_forwarding_reports_correct_signal() {
     use std::process::{Command, Stdio};
     use std::thread;
 
-    let timeout_process = Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let timeout_process = Command::new(timeout_bin_path().as_str())
         .args(["-v", "30s", "sleep", "100"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1875,7 +1901,7 @@ fn test_signal_forwarded_json_rusage() {
     use std::process::{Command, Stdio};
     use std::thread;
 
-    let timeout_process = Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let timeout_process = Command::new(timeout_bin_path().as_str())
         .args(["--json", "30s", "sleep", "100"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -2582,7 +2608,7 @@ fn test_stdin_timeout_triggers() {
      * We must take() the stdin handle to prevent EOF when wait() is called.
      */
     use std::process::Stdio;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args(["--stdin-timeout", "200ms", "60s", "sleep", "60"])
         .stdin(Stdio::piped())
         .spawn()
@@ -2600,7 +2626,7 @@ fn test_stdin_timeout_short_flag() {
      * -S short flag should work like --stdin-timeout
      */
     use std::process::Stdio;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args(["-S", "200ms", "60s", "sleep", "60"])
         .stdin(Stdio::piped())
         .spawn()
@@ -2617,7 +2643,7 @@ fn test_stdin_timeout_short_flag_embedded() {
      * -S200ms embedded value should work
      */
     use std::process::Stdio;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args(["-S200ms", "60s", "sleep", "60"])
         .stdin(Stdio::piped())
         .spawn()
@@ -2649,7 +2675,7 @@ fn test_stdin_timeout_env_var() {
      * TIMEOUT_STDIN_TIMEOUT env var should set default stdin timeout
      */
     use std::process::Stdio;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .env("TIMEOUT_STDIN_TIMEOUT", "200ms")
         .args(["60s", "sleep", "60"])
         .stdin(Stdio::piped())
@@ -2673,7 +2699,7 @@ fn test_stdin_timeout_cli_overrides_env() {
     use std::process::Stdio;
     /* env var would trigger quickly (50ms), but CLI sets longer timeout (60s) */
     /* so wall clock timeout (200ms) fires first */
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .env("TIMEOUT_STDIN_TIMEOUT", "50ms")
         .args(["--stdin-timeout", "60s", "200ms", "sleep", "60"])
         .stdin(Stdio::piped())
@@ -2693,7 +2719,7 @@ fn test_stdin_timeout_json_reason_stdin_idle() {
      */
     use std::io::Read;
     use std::process::Stdio;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args(["--json", "--stdin-timeout", "100ms", "60s", "sleep", "60"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2749,7 +2775,7 @@ fn test_stdin_timeout_verbose() {
      * Verbose should show stdin idle message
      */
     use std::process::Stdio;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args([
             "--verbose",
             "--stdin-timeout",
@@ -2786,7 +2812,7 @@ fn test_stdin_timeout_quiet() {
      * Quiet mode should suppress stdin timeout messages
      */
     use std::process::Stdio;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args(["--quiet", "--stdin-timeout", "100ms", "60s", "sleep", "60"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2818,7 +2844,7 @@ fn test_stdin_timeout_with_wall_timeout() {
      */
     use std::process::Stdio;
     let start = std::time::Instant::now();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args(["--stdin-timeout", "100ms", "60s", "sleep", "60"])
         .stdin(Stdio::piped())
         .spawn()
@@ -2844,7 +2870,7 @@ fn test_stdin_timeout_wall_timeout_fires_first() {
      */
     use std::io::Read;
     use std::process::Stdio;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args(["--json", "--stdin-timeout", "60s", "100ms", "sleep", "60"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2873,7 +2899,7 @@ fn test_stdin_timeout_with_heartbeat() {
      */
     use std::io::Read;
     use std::process::Stdio;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args([
             "--heartbeat",
             "50ms",
@@ -2910,7 +2936,7 @@ fn test_stdin_timeout_combined_flags() {
      */
     use std::io::Read;
     use std::process::Stdio;
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args(["-v", "-S", "100ms", "60s", "sleep", "60"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2945,7 +2971,7 @@ fn test_stdin_timeout_dev_null_no_busy_loop() {
     let dev_null = File::open("/dev/null").expect("failed to open /dev/null");
     let start = std::time::Instant::now();
 
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args(["--stdin-timeout", "50ms", "200ms", "sleep", "60"])
         .stdin(dev_null)
         .spawn()
@@ -2981,7 +3007,7 @@ fn test_stdin_timeout_null_stdin_no_cpu_spike() {
 
     let start = std::time::Instant::now();
 
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args(["--stdin-timeout", "50ms", "200ms", "sleep", "60"])
         .stdin(Stdio::null())
         .spawn()
@@ -3013,7 +3039,7 @@ fn test_stdin_timeout_closed_stdin_graceful() {
             "-c",
             &format!(
                 "{} --stdin-timeout 50ms 200ms sleep 60 0<&-",
-                env!("CARGO_BIN_EXE_timeout")
+                timeout_bin_path().as_str()
             ),
         ])
         .output()
@@ -3040,7 +3066,7 @@ fn test_stdin_timeout_json_with_dev_null() {
 
     let dev_null = File::open("/dev/null").expect("failed to open /dev/null");
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let output = std::process::Command::new(timeout_bin_path().as_str())
         .args(["--json", "--stdin-timeout", "50ms", "100ms", "sleep", "60"])
         .stdin(dev_null)
         .output()
@@ -3066,7 +3092,7 @@ fn test_stdin_timeout_with_retry() {
     use std::process::Stdio;
 
     let start = std::time::Instant::now();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let mut child = std::process::Command::new(timeout_bin_path().as_str())
         .args([
             "--json",
             "--stdin-timeout",
@@ -3122,7 +3148,7 @@ fn test_stdin_timeout_retry_with_dev_null() {
     let dev_null = File::open("/dev/null").expect("failed to open /dev/null");
     let start = std::time::Instant::now();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_timeout"))
+    let output = std::process::Command::new(timeout_bin_path().as_str())
         .args([
             "--json",
             "--stdin-timeout",
