@@ -8,9 +8,9 @@
 # have passed CI.
 #
 # Produces:
-#   - timeout-macos-arm64.tar.gz      (Apple Silicon)
-#   - timeout-macos-x86_64.tar.gz     (Intel)
-#   - timeout-macos-universal.tar.gz  (Universal binary, used by Homebrew)
+#   - procguard-macos-arm64.tar.gz      (Apple Silicon)
+#   - procguard-macos-x86_64.tar.gz     (Intel)
+#   - procguard-macos-universal.tar.gz  (Universal binary, used by Homebrew)
 #
 # Usage:
 #   git tag -a v1.0.0 -m "v1.0.0"
@@ -21,7 +21,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 env:
   CARGO_TERM_COLOR: always
@@ -54,44 +54,48 @@ jobs:
       - name: Create binaries
         run: |
           mkdir -p dist staging
-          
+
           # ARM64 (Apple Silicon)
-          cp target/aarch64-apple-darwin/release/timeout staging/timeout
-          strip staging/timeout
-          codesign -s - staging/timeout
+          cp target/aarch64-apple-darwin/release/procguard staging/procguard
+          strip staging/procguard
+          codesign -s - staging/procguard
+          ln -s procguard staging/timeout
           cp -r completions staging/
-          tar -C staging -czvf dist/timeout-macos-arm64.tar.gz timeout completions
-          rm staging/timeout
-          
+          tar -C staging -czvf dist/procguard-macos-arm64.tar.gz procguard timeout completions
+          rm staging/procguard staging/timeout
+
           # x86_64 (Intel)
-          cp target/x86_64-apple-darwin/release/timeout staging/timeout
-          strip staging/timeout
-          codesign -s - staging/timeout
-          tar -C staging -czvf dist/timeout-macos-x86_64.tar.gz timeout completions
-          rm staging/timeout
-          
+          cp target/x86_64-apple-darwin/release/procguard staging/procguard
+          strip staging/procguard
+          codesign -s - staging/procguard
+          ln -s procguard staging/timeout
+          tar -C staging -czvf dist/procguard-macos-x86_64.tar.gz procguard timeout completions
+          rm staging/procguard staging/timeout
+
           # Universal (unversioned name for stable Homebrew URL)
           lipo -create \
-            target/aarch64-apple-darwin/release/timeout \
-            target/x86_64-apple-darwin/release/timeout \
-            -output staging/timeout
-          strip staging/timeout
-          codesign -s - staging/timeout
-          tar -C staging -czvf dist/timeout-macos-universal.tar.gz timeout completions
-          rm staging/timeout
-          
+            target/aarch64-apple-darwin/release/procguard \
+            target/x86_64-apple-darwin/release/procguard \
+            -output staging/procguard
+          strip staging/procguard
+          codesign -s - staging/procguard
+          ln -s procguard staging/timeout
+          tar -C staging -czvf dist/procguard-macos-universal.tar.gz procguard timeout completions
+          rm staging/procguard staging/timeout
+
           # Show results
           ls -lh dist/
 
       - name: Verify binaries
         run: |
-          for f in dist/timeout-macos-*.tar.gz; do
+          for f in dist/procguard-macos-*.tar.gz; do
             echo "=== $f ==="
             tar -tzf "$f"
             tar -xzf "$f" -C /tmp
-            file /tmp/timeout
+            file /tmp/procguard
+            /tmp/procguard --version
             /tmp/timeout --version
-            rm -rf /tmp/timeout /tmp/completions
+            rm -rf /tmp/procguard /tmp/timeout /tmp/completions
           done
 
       - name: Create Release
@@ -106,17 +110,18 @@ jobs:
 
             | Platform | File |
             |----------|------|
-            | Apple Silicon | `timeout-macos-arm64.tar.gz` |
-            | Intel | `timeout-macos-x86_64.tar.gz` |
-            | Universal | `timeout-macos-universal.tar.gz` |
+            | Apple Silicon | `procguard-macos-arm64.tar.gz` |
+            | Intel | `procguard-macos-x86_64.tar.gz` |
+            | Universal | `procguard-macos-universal.tar.gz` |
 
             ```bash
             # Example: Install universal binary
-            tar -xzf timeout-macos-universal.tar.gz
-            sudo mv timeout /usr/local/bin/
+            tar -xzf procguard-macos-universal.tar.gz
+            sudo mv procguard timeout /usr/local/bin/
             ```
 
-            Verify with `timeout --version`.
+            Both `procguard` and `timeout` commands are included.
+            Verify with `procguard --version`.
           files: dist/*.tar.gz
           draft: false
           prerelease: false
