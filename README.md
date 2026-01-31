@@ -1,83 +1,56 @@
 # procguard
 
-The formally verified process supervisor for macOS.
+The process supervisor for macOS. No equivalent exists.
 
-**CLI tool** — process timeouts, resource limits, lifecycle control.  
-**Rust library** — embed supervision logic in your own tools.
+**Resource enforcement** — memory limits, CPU throttling, time quotas.  
+**Process lifecycle** — coordinated startup, graceful shutdown, retry logic.  
+**Formal verification** — 19 mathematical proofs, not just tests.  
+**~100KB binary** — zero dependencies, instant startup.
 
-    brew install denispol/tap/procguard          # CLI
-    cargo add procguard                           # library
-
-Works exactly like GNU timeout (it's a drop-in replacement):
-
-    procguard 30s ./slow-command           # kill after 30 seconds
-    procguard -k 5 1m ./stubborn           # SIGTERM, then SIGKILL after 5s
-    procguard --preserve-status 10s ./cmd  # exit with command's status
-
-Plus features GNU doesn't have:
-
-    procguard --json 5m ./test-suite       # JSON output for CI
-    procguard --on-timeout 'cleanup.sh' 30s ./task  # pre-timeout hook
-    procguard --retry 3 30s ./flaky-test   # retry on timeout
-    procguard --mem-limit 1G 1h ./build    # kill if memory exceeds 1GB
-    procguard --cpu-percent 50 1h ./batch  # throttle to 50% CPU
-
-## GNU Compatibility
-
-**Dual binary:** `procguard` is the primary binary. A `timeout` alias is also provided for scripts expecting GNU timeout.
-
-| Binary      | Default Behavior                  | Use Case                  |
-| ----------- | --------------------------------- | ------------------------- |
-| `procguard` | Wall clock (survives sleep)       | macOS-native, sleep-aware |
-| `timeout`   | Active time (pauses during sleep) | GNU-compatible scripts    |
+    brew install denispol/tap/procguard
 
 ```bash
-# These behave identically to GNU timeout:
-timeout 30s ./command
-timeout -k 5 1m ./stubborn
-
-# procguard defaults to wall-clock (unique to macOS):
-procguard 30s ./command              # survives system sleep
-procguard -c active 30s ./command    # GNU-like behavior
+procguard --mem-limit 4G 2h make -j8       # kill if memory exceeds 4GB
+procguard --cpu-percent 50 1h ./batch      # throttle to 50% CPU
+procguard --cpu-time 5m 1h ./compute       # hard 5-minute CPU limit
+procguard --wait-for-file /tmp/ready 5m ./app  # coordinated startup
+procguard --on-timeout 'cleanup.sh' 30s ./task # pre-kill hook
+procguard --json --retry 3 5m ./test-suite     # CI integration
 ```
 
 ## Why procguard?
 
-Apple doesn't ship `timeout`. The alternatives have problems:
+macOS has no process supervisor. You can't:
 
-**GNU coreutils** (`brew install coreutils`):
+- Kill a build if it uses too much memory
+- Throttle background jobs to save battery
+- Coordinate service startup with dependencies
+- Get structured output from process execution
 
-- 15.7MB and 475 files for one command
-- **Stops counting when your Mac sleeps** (uses `nanosleep`)
+**Docker/Kubernetes?** Overkill for local development. Requires containers.  
+**launchd?** No resource limits. No structured output. XML configuration hell.  
+**ulimit?** Only self-imposed. Child processes can ignore it.
 
-**uutils** (Rust rewrite of coreutils):
+procguard fills this gap: real process supervision, native macOS, zero overhead.
 
-- Also stops counting during sleep (uses `Instant`/`mach_absolute_time`)
+## Also a timeout command
 
-procguard uses `mach_continuous_time`, the only macOS clock that keeps ticking through sleep. Set 1 hour, get 1 hour, even if you close your laptop.
+Apple doesn't ship `timeout`. procguard includes a `timeout` binary as a drop-in replacement for GNU coreutils:
 
-**Scenario:** `procguard 1h ./build` with laptop sleeping 45min in the middle
+```bash
+timeout 30s ./command              # GNU-compatible
+timeout -k 5 1m ./stubborn         # SIGTERM, then SIGKILL
+procguard 30s ./command            # same, but wall-clock default
+```
 
-    0        15min                 1h                    1h 45min
-    ├──────────┬──────────────────────────────┬──────────────────────────────┤
-    Real time  │▓▓▓▓▓▓▓▓▓▓│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│
-              │  awake   │            sleep             │            awake             │
-              └──────────┴──────────────────────────────┴──────────────────────────────┘
+**Bonus:** procguard uses `mach_continuous_time`—the only macOS clock that survives system sleep. Set 1 hour, get 1 hour, even if you close your laptop.
 
-    procguard       |██████████|██████████████████████████████^ fires at 1h ✓
-                               (counts sleep time)
-
-    GNU timeout     |██████████|······························|██████████████████████████████^ fires at 1h 45min ✗
-                               (pauses during sleep)
-
-    Legend: ▓ awake  ░ sleep  █ counting  · paused  ^ fire point
-
-|                           | procguard          | GNU coreutils   |
+| Feature                   | procguard          | GNU coreutils   |
 | ------------------------- | ------------------ | --------------- |
-| Works during system sleep | ✓                  | ✗               |
-| Selectable time mode      | ✓ (wall/active)    | ✗ (active only) |
 | **Resource limits**       | ✓ (mem/CPU)        | ✗               |
 | **Formal verification**   | ✓ (19 kani proofs) | ✗               |
+| Works during system sleep | ✓                  | ✗               |
+| Selectable time mode      | ✓ (wall/active)    | ✗ (active only) |
 | JSON output               | ✓                  | ✗               |
 | Retry on timeout          | ✓                  | ✗               |
 | Stdin idle timeout        | ✓                  | ✗               |
@@ -88,11 +61,8 @@ procguard uses `mach_continuous_time`, the only macOS clock that keeps ticking t
 | Env var configuration     | ✓                  | ✗               |
 | Binary size               | ~100KB             | 15.7MB          |
 | Startup time              | 3.6ms              | 4.2ms           |
-| Zero CPU while waiting    | ✓ (kqueue)         | ✓ (nanosleep)   |
 
 _Performance data from [250 benchmark runs](#benchmarks) on Apple M4 Pro._
-
-100% GNU-compatible. All flags work identically (`-s`, `-k`, `-p`, `-f`, `-v`). Drop-in replacement for Apple Silicon and Intel Macs.
 
 ## Quality & Verification
 

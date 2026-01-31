@@ -14,44 +14,22 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::time::{Duration, Instant};
 
-/* helper to get the procguard binary and create timeout symlink if needed */
-#[allow(deprecated)] /* cargo_bin! macro requires nightly, we use stable */
-fn ensure_timeout_symlink() -> std::path::PathBuf {
-    use std::path::PathBuf;
-
-    /* get the procguard binary path from cargo */
-    let procguard_path = assert_cmd::cargo::cargo_bin("procguard");
-
-    /* create timeout symlink next to procguard if it doesn't exist */
-    let mut timeout_path = PathBuf::from(&procguard_path);
-    timeout_path.pop();
-    timeout_path.push("timeout");
-
-    /* create symlink if missing (idempotent) */
-    if !timeout_path.exists() {
-        #[cfg(unix)]
-        {
-            let _ = std::os::unix::fs::symlink("procguard", &timeout_path);
-        }
-    }
-
-    timeout_path
-}
-
-/* get the timeout binary path (symlink) as a string  */
+/* get the timeout binary path as a string */
+#[allow(deprecated)] /* cargo_bin deprecated but cargo_bin! requires nightly */
 fn timeout_bin_path() -> String {
-    ensure_timeout_symlink().to_string_lossy().into_owned()
+    assert_cmd::cargo::cargo_bin("timeout")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /* timeout alias - tests mostly use this for GNU compatibility */
-#[allow(deprecated)]
+#[allow(deprecated)] /* cargo_bin deprecated but cargo_bin! requires nightly */
 fn timeout_cmd() -> Command {
-    let timeout_path = ensure_timeout_symlink();
-    Command::new(timeout_path)
+    Command::cargo_bin("timeout").unwrap()
 }
 
 /* procguard primary binary */
-#[allow(dead_code, deprecated)] /* cargo_bin! macro requires nightly, we use stable */
+#[allow(dead_code, deprecated)] /* cargo_bin deprecated but cargo_bin! requires nightly */
 fn procguard_cmd() -> Command {
     Command::cargo_bin("procguard").unwrap()
 }
