@@ -101,7 +101,7 @@ procguard uses a **five-layer verification approach**:
 | Method                         | Coverage                   | What It Catches                                   |
 | ------------------------------ | -------------------------- | ------------------------------------------------- |
 | **Unit tests**                 | 154 tests                  | Logic errors, edge cases                          |
-| **Integration tests**          | 184 tests                  | Real process behavior, signals, I/O               |
+| **Integration tests**          | 185 tests                  | Real process behavior, signals, I/O               |
 | **Library API tests**          | 10 tests                   | Public API usability, lifecycle                   |
 | **Property-based (proptest)**  | 30 properties, ~7500 cases | Input invariants, mathematical relationships      |
 | **Fuzzing (cargo-fuzz)**       | 4 targets, ~70M executions | Crashes, panics, hangs from malformed input       |

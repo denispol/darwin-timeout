@@ -67,13 +67,16 @@ opt-level = 3
 debug-assertions = true
 overflow-checks = true
 
-# Primary binary - wall-clock default
-# The `timeout` alias is created as a symlink during packaging/installation
-# for GNU compatibility. Behavior is detected via argv[0] at runtime:
+# Both binaries share the same source - behavior detected via argv[0] at runtime:
 # - "procguard": defaults to --confine wall (sleep-aware)
 # - "timeout": defaults to --confine active (GNU-compatible)
+# Note: Cargo warns about shared main.rs; this is intentional for cargo install support.
 [[bin]]
 name = "procguard"
+path = "src/main.rs"
+
+[[bin]]
+name = "timeout"
 path = "src/main.rs"
 
 [package.metadata.docs.rs]
